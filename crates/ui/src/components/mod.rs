@@ -157,6 +157,22 @@ pub fn button(
     button_with_identity(id, label, variant, size, theme, theme.identity_color(""))
 }
 
+/// Opacity of a disabled button.
+pub const DISABLED_BUTTON_OPACITY: f32 = 0.5;
+
+/// [`button`] with a `disabled` flag: dimmed, no hover restyle, default cursor.
+/// Callers must still skip attaching their click handler when disabled.
+pub fn button_disabled(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    variant: ButtonVariant,
+    size: ButtonSize,
+    theme: &Theme,
+    disabled: bool,
+) -> Stateful<Div> {
+    button_full(id, label, variant, size, theme, theme.identity_color(""), disabled)
+}
+
 /// Use the caller's agent identity for Horizon's filled primary action.
 pub fn button_with_identity(
     id: impl Into<ElementId>,
@@ -165,6 +181,18 @@ pub fn button_with_identity(
     size: ButtonSize,
     theme: &Theme,
     identity: gpui::Hsla,
+) -> Stateful<Div> {
+    button_full(id, label, variant, size, theme, identity, false)
+}
+
+fn button_full(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    variant: ButtonVariant,
+    size: ButtonSize,
+    theme: &Theme,
+    identity: gpui::Hsla,
+    disabled: bool,
 ) -> Stateful<Div> {
     let label = label.into();
     let horizon = theme.ui_style.conversation == crate::ui_style::ConversationVariant::Horizon;
@@ -192,14 +220,15 @@ pub fn button_with_identity(
             })
         })
         .text_size(crate::typography::ui_rems(font + font_adjustment))
-        .cursor_pointer();
+        .cursor_pointer()
+        .when(disabled, |el| el.cursor_default().opacity(DISABLED_BUTTON_OPACITY));
     match variant {
         ButtonVariant::Secondary => {
             let button = button
                 .border_1()
                 .border_color(theme.border)
                 .text_color(theme.text_muted)
-                .hover(|el| el.bg(theme.element_hover).text_color(theme.text));
+                .when(!disabled, |el| el.hover(|el| el.bg(theme.element_hover).text_color(theme.text)));
             crate::surface_chrome::segmented_key(button, theme, false)
                 .when_some(theme.ui_style.design_roles.control_radius, |el, radius| el.rounded(px(radius)))
                 .when_some(theme.ui_style.design_roles.secondary_colour, |el, role| { let colour = role.colour(theme); el.border_color(colour).text_color(colour) })
@@ -211,7 +240,7 @@ pub fn button_with_identity(
                 .bg(theme.text)
                 .text_color(theme.on_solid)
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .hover(|el| el.opacity(0.9));
+                .when(!disabled, |el| el.hover(|el| el.opacity(0.9)));
             let button = if horizon {
                 button
                     .bg(identity)
@@ -235,13 +264,13 @@ pub fn button_with_identity(
                 .bg(fill)
                 .text_color(theme.identity_text(fill))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .hover(|el| el.opacity(0.9))
+                .when(!disabled, |el| el.hover(|el| el.opacity(0.9)))
                 .child(label)
         }
         ButtonVariant::Ghost => {
             let button = button
                 .text_color(theme.text_muted)
-                .hover(|el| el.bg(theme.element_hover).text_color(theme.text));
+                .when(!disabled, |el| el.hover(|el| el.bg(theme.element_hover).text_color(theme.text)));
             crate::surface_chrome::segmented_key(button, theme, false).child(label)
         }
     }
@@ -1129,6 +1158,19 @@ pub fn section_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_button_dims_and_has_no_hover_restyle() {
+        let theme = Theme::for_selection(crate::theme::Appearance::Dark, "mast-dark", Default::default(), mast_theme::SurfacePreference::Opaque);
+        for variant in [ButtonVariant::Primary, ButtonVariant::Secondary, ButtonVariant::Danger, ButtonVariant::Ghost] {
+            let mut on = button_disabled("b", "x", variant, ButtonSize::Sm, &theme, false);
+            assert_eq!(on.style().opacity, None);
+            assert!(on.interactivity().hover_style.is_some());
+            let mut off = button_disabled("b", "x", variant, ButtonSize::Sm, &theme, true);
+            assert_eq!(off.style().opacity, Some(DISABLED_BUTTON_OPACITY));
+            assert!(off.interactivity().hover_style.is_none());
+        }
+    }
 
     #[test]
     fn horizon_primary_chrome_uses_a_muted_theme_colour() {
