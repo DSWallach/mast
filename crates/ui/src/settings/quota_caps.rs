@@ -602,7 +602,7 @@ impl QuotaCaps {
                         this.edit(|editor| editor.step(cap, delta), cx)
                     }))
             })
-            .when(!enabled, |el| el.opacity(0.4))
+            .when(!enabled, |el| el.opacity(crate::components::DISABLED_BUTTON_OPACITY).cursor_default())
             .child(SharedString::from(glyph))
             .into_any_element()
     }
@@ -637,30 +637,24 @@ impl QuotaCaps {
                                 this.edit(|editor| editor.draft = QuotaSettings::default(), cx)
                             }))
                     })
-                    .when(!can_reset, |el| el.opacity(0.4))
+                    .when(!can_reset, |el| el.opacity(crate::components::DISABLED_BUTTON_OPACITY).cursor_default())
                     .child(SharedString::from("Reset to defaults")),
             )
             .child(
-                // The primary button's hover style resets its own opacity to 0.9, which made a
-                // disabled Save under the cursor look enabled. Dim a wrapper instead.
-                div()
-                    .when(!can_save, |el| el.opacity(0.4))
-                    .child(
-                        crate::components::button(
-                            "quota-caps-save",
-                            label,
-                            ButtonVariant::Primary,
-                            ButtonSize::Md,
-                            theme,
-                        )
-                        .debug_selector(move || {
-                            if can_save { "quota-caps-save-enabled" } else { "quota-caps-save-disabled" }.into()
-                        })
-                        .when(can_save, |el| {
-                            el.on_click(cx.listener(|this, _, _, cx| this.save(cx)))
-                        })
-                        .when(!can_save, |el| el.cursor_default()),
-                    ),
+                crate::components::button_disabled(
+                    "quota-caps-save",
+                    label,
+                    ButtonVariant::Primary,
+                    ButtonSize::Md,
+                    theme,
+                    !can_save,
+                )
+                .debug_selector(move || {
+                    if can_save { "quota-caps-save-enabled" } else { "quota-caps-save-disabled" }.into()
+                })
+                .when(can_save, |el| {
+                    el.on_click(cx.listener(|this, _, _, cx| this.save(cx)))
+                }),
             )
             .into_any_element()
     }

@@ -734,8 +734,7 @@ impl Changes {
                         .on_click(cx.listener(|this, _, _, cx| this.close_submit_review(cx))),
                     )
                     .when(!finished && !conflict, |el| {
-                        let send = button("submit-review-send", primary_label, ButtonVariant::Primary, ButtonSize::Sm, theme)
-                            .when(!enabled || busy || preparing, |el| el.opacity(0.5));
+                        let send = crate::components::button_disabled("submit-review-send", primary_label, ButtonVariant::Primary, ButtonSize::Sm, theme, !enabled || busy || preparing);
                         el.child(if enabled && !busy && !preparing {
                             send.on_click(cx.listener(|this, _, _, cx| this.submit_review_now(cx)))
                         } else {
