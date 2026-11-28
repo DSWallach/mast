@@ -89,7 +89,8 @@ fn broker_windows(provider: &ProviderHeadroom) -> Vec<HeadroomWindow> {
     provider
         .estimated
         .map(|used| HeadroomWindow {
-            label: "Estimated from local usage".into(),
+            // Short enough for the bar's label column.
+            label: "Estimated".into(),
             model: None,
             used: used.clamp(0.0, 1.0),
             resets_at: None,
@@ -245,7 +246,7 @@ mod tests {
         assert_eq!(claude[0].model.as_deref(), Some("Opus"));
         assert_eq!(claude[0].used, 0.7);
         let agy = broker.windows(HarnessId::Antigravity);
-        assert_eq!(agy[0].label, "Estimated from local usage");
+        assert_eq!(agy[0].label, "Estimated");
         assert_eq!(agy[0].used, 0.4);
         assert!(broker.windows(HarnessId::Codex).is_empty());
     }
