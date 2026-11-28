@@ -41,6 +41,15 @@ impl Provider {
             Provider::Codex => "codex",
         }
     }
+
+    /// The harness id that keys per-provider settings.
+    pub fn harness_id(self) -> &'static str {
+        match self {
+            Provider::Antigravity => "antigravity",
+            Provider::ClaudeCode => "claude-code",
+            Provider::Codex => "codex",
+        }
+    }
 }
 
 pub trait Clock: Send + Sync {
@@ -101,10 +110,13 @@ pub struct BrokerConfig {
     pub hard_cap: f32,
     pub soft_cap: f32,
     pub freeze_cap: f32,
+    /// Per-provider hard caps, indexed by `Provider as usize`; `None` uses
+    /// `hard_cap`. Read through [`BrokerConfig::hard_cap_for`].
+    pub provider_hard_caps: [Option<f32>; 3],
     pub poll_interval: Duration,
     pub agy_poll_interval: Duration,
-    /// Longest any reservation counts, whether or not probes succeed. Should
-    /// exceed both poll intervals.
+    /// Longest any reservation counts, whether or not probes succeed. Must
+    /// exceed both poll intervals and be at most [`MAX_RESERVATION_TTL`].
     pub reservation_ttl: Duration,
 }
 
@@ -114,6 +126,7 @@ impl Default for BrokerConfig {
             hard_cap: 0.85,
             soft_cap: 0.78,
             freeze_cap: 0.90,
+            provider_hard_caps: [None; 3],
             poll_interval: Duration::from_secs(90),
             agy_poll_interval: Duration::from_secs(180),
             reservation_ttl: Duration::from_secs(600),
@@ -121,22 +134,59 @@ impl Default for BrokerConfig {
     }
 }
 
+/// Longest allowed poll interval.
+pub const MAX_POLL_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Longest allowed reservation TTL.
+pub const MAX_RESERVATION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// A reading older than this many poll intervals takes no new work.
+const STALE_AFTER_INTERVALS: i32 = 3;
+
 impl BrokerConfig {
-    /// Caps must satisfy `0 < soft_cap < hard_cap < freeze_cap <= 1`.
+    /// Caps must satisfy `0 < soft_cap < hard_cap < freeze_cap <= 1`, each
+    /// per-provider hard cap included. Poll intervals must be non-zero and at
+    /// most [`MAX_POLL_INTERVAL`]; `reservation_ttl` must be longer than both
+    /// and at most [`MAX_RESERVATION_TTL`]. The bounds keep every time sum in
+    /// the broker in range.
     pub fn validate(&self) -> Result<(), InvalidBrokerConfig> {
-        let ordered = 0.0 < self.soft_cap
-            && self.soft_cap < self.hard_cap
-            && self.hard_cap < self.freeze_cap
-            && self.freeze_cap <= 1.0;
-        if ordered {
-            Ok(())
-        } else {
-            Err(InvalidBrokerConfig {
-                soft_cap: self.soft_cap,
-                hard_cap: self.hard_cap,
-                freeze_cap: self.freeze_cap,
-            })
+        let ordered = |hard: f32| {
+            0.0 < self.soft_cap
+                && self.soft_cap < hard
+                && hard < self.freeze_cap
+                && self.freeze_cap <= 1.0
+        };
+        let hard_caps =
+            std::iter::once(self.hard_cap).chain(self.provider_hard_caps.into_iter().flatten());
+        for hard_cap in hard_caps {
+            if !ordered(hard_cap) {
+                return Err(InvalidBrokerConfig::Caps {
+                    soft_cap: self.soft_cap,
+                    hard_cap,
+                    freeze_cap: self.freeze_cap,
+                });
+            }
         }
+        let intervals = [self.poll_interval, self.agy_poll_interval];
+        for interval in intervals {
+            if interval.is_zero() || interval > MAX_POLL_INTERVAL {
+                return Err(InvalidBrokerConfig::PollInterval { interval });
+            }
+        }
+        let ttl = self.reservation_ttl;
+        if intervals.iter().any(|interval| ttl <= *interval) || ttl > MAX_RESERVATION_TTL {
+            return Err(InvalidBrokerConfig::ReservationTtl { ttl });
+        }
+        Ok(())
+    }
+
+    /// The hard cap a provider is held to under balanced failover.
+    pub fn hard_cap_for(&self, provider: Provider) -> f32 {
+        self.provider_hard_caps[provider as usize].unwrap_or(self.hard_cap)
+    }
+
+    /// Where pinned freeze stops: the provider's own hard cap when the user
+    /// set one, else `freeze_cap`.
+    pub fn pinned_cap_for(&self, provider: Provider) -> f32 {
+        self.provider_hard_caps[provider as usize].unwrap_or(self.freeze_cap)
     }
 
     fn interval(&self, provider: Provider) -> Duration {
@@ -148,19 +198,40 @@ impl BrokerConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct InvalidBrokerConfig {
-    pub soft_cap: f32,
-    pub hard_cap: f32,
-    pub freeze_cap: f32,
+pub enum InvalidBrokerConfig {
+    Caps {
+        soft_cap: f32,
+        hard_cap: f32,
+        freeze_cap: f32,
+    },
+    PollInterval {
+        interval: Duration,
+    },
+    ReservationTtl {
+        ttl: Duration,
+    },
 }
 
 impl std::fmt::Display for InvalidBrokerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "quota caps must satisfy 0 < soft < hard < freeze <= 1 (soft {}, hard {}, freeze {})",
-            self.soft_cap, self.hard_cap, self.freeze_cap
-        )
+        match self {
+            Self::Caps {
+                soft_cap,
+                hard_cap,
+                freeze_cap,
+            } => write!(
+                f,
+                "quota caps must satisfy 0 < soft < hard < freeze <= 1 (soft {soft_cap}, hard {hard_cap}, freeze {freeze_cap})"
+            ),
+            Self::PollInterval { interval } => write!(
+                f,
+                "quota poll intervals must be above zero and at most {MAX_POLL_INTERVAL:?} (got {interval:?})"
+            ),
+            Self::ReservationTtl { ttl } => write!(
+                f,
+                "the reservation TTL must be longer than both poll intervals and at most {MAX_RESERVATION_TTL:?} (got {ttl:?})"
+            ),
+        }
     }
 }
 
@@ -169,28 +240,28 @@ impl std::error::Error for InvalidBrokerConfig {}
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
     Dispatch(Provider),
-    /// No provider is eligible. `resume_at` is the earliest time one may have
-    /// room again: a window reset, a reservation ageing out or expiring or,
-    /// for usage with no known reset, the next poll. A hint to decide again,
-    /// not a promise.
+    /// No provider can take the work now. `resume_at` says what to do next.
+    /// It is a hint to decide again, never a promise of room.
     ///
-    /// `None` means no time can be predicted: every provider needs sign-in or
-    /// has unknown usage, or the cost alone exceeds `hard_cap`. It is not
-    /// permanent. A sign-in, a later successful poll or a smaller cost can
-    /// change the answer, so callers must keep polling and decide again rather
-    /// than park the work for good.
-    ///
-    /// `resume_at` can equal the current time when a poll is overdue. Callers
-    /// must run `poll_due` before deciding again and wait a minimum delay
-    /// between attempts: nothing is re-read while orchestration is inactive,
-    /// so sleeping only until `resume_at` could spin.
+    /// - `Some(later)`: the earliest time that may change: a window reset, a
+    ///   reservation ageing out or expiring, or the next poll for usage that
+    ///   is unknown or has no known reset.
+    /// - `Some(now)`: a poll is due (never polled, reading gone stale, just
+    ///   reactivated, or overdue). Run `poll_due`, then decide again, with a
+    ///   minimum delay between attempts: `poll_due` does nothing while
+    ///   orchestration is inactive, so retrying at once could spin.
+    /// - `None`: waiting alone cannot help. Every provider needs sign-in, or
+    ///   the cost is more than any of their caps. Not permanent: a sign-in
+    ///   (seen by a later poll) or a smaller cost changes the answer, so keep
+    ///   polling rather than park the work for good.
     PauseAll {
         resume_at: Option<DateTime<Utc>>,
     },
-    /// PinnedFreeze cannot continue: the work would pass `freeze_cap`, or the
-    /// provider needs sign-in or its usage is unknown. `fraction` is the usage
-    /// before this work (it can be under `freeze_cap` when the cost is what
-    /// does not fit); `None` when unknown.
+    /// PinnedFreeze cannot continue: the work would pass the pinned cap
+    /// ([`BrokerConfig::pinned_cap_for`]), or the provider needs sign-in or
+    /// its usage is unknown or stale. `fraction` is the last usage before this
+    /// work (it can be under the cap when the cost is what does not fit);
+    /// `None` when unknown.
     Freeze {
         provider: Provider,
         fraction: Option<f32>,
@@ -260,9 +331,11 @@ pub struct QuotaBroker {
 /// Every usage figure behind a provider, with the reset that clears it when
 /// one is known. Empty when usage is unknown.
 ///
+/// Account-wide figures (account-wide windows, per-window credit budgets and
+/// the reading's own `credit_budget_fraction`) cap the provider for any work.
 /// Window scope is deliberately ignored: a dispatch does not say which model
 /// the work will use, so an exhausted model-family window caps the whole
-/// provider. This can hold back work another model could have taken, but never
+/// provider too. This can hold back work another model could have taken, but never
 /// sends work into an exhausted window.
 fn usage_sources(p: &ProviderState) -> Vec<(f32, Option<DateTime<Utc>>)> {
     let Some(reading) = &p.reading else {
@@ -286,6 +359,12 @@ fn used_fraction(p: &ProviderState) -> Option<f32> {
         return None;
     }
     sources.into_iter().map(|(f, _)| f).reduce(f32::max)
+}
+
+/// Two decimals, widened to f64 first so `0.85` does not print as
+/// `0.8500000238418579`.
+fn percent(fraction: f32) -> Value {
+    json!((f64::from(fraction) * 100.0).round() / 100.0)
 }
 
 /// Whether a provider at `fraction` can take `cost` under `cap`.
@@ -330,9 +409,35 @@ impl QuotaBroker {
         state
     }
 
-    /// Polling happens only while orchestration is active.
+    /// Polling happens only while orchestration is active. Reactivating makes
+    /// every provider due and its old reading stale, so nothing is dispatched
+    /// until `poll_due` has read it again.
     pub fn set_orchestration_active(&self, active: bool) {
-        self.state.lock().unwrap().active = active;
+        let mut state = self.lock_state();
+        if active && !state.active {
+            for provider in state.providers.values_mut() {
+                provider.last_polled = None;
+            }
+        }
+        state.active = active;
+    }
+
+    /// Whether a provider has no reading recent enough to dispatch on.
+    fn is_stale(&self, state: &State, provider: Provider, now: DateTime<Utc>) -> bool {
+        let max_age = self.interval(provider) * STALE_AFTER_INTERVALS;
+        state
+            .providers
+            .get(&provider)
+            .and_then(|p| p.last_polled)
+            .is_none_or(|at| now - at > max_age)
+    }
+
+    /// The usage new work is judged on: `None` unless the provider is signed
+    /// in with a known, fresh reading.
+    fn dispatchable(&self, state: &State, provider: Provider, now: DateTime<Utc>) -> Option<f32> {
+        state
+            .dispatchable(provider)
+            .filter(|_| !self.is_stale(state, provider, now))
     }
 
     /// Poll every provider whose interval has elapsed. Returns the providers
@@ -468,8 +573,8 @@ impl QuotaBroker {
         now: DateTime<Utc>,
     ) -> Decision {
         match policy {
-            ProviderQuotaPolicy::PinnedFreeze => match state.dispatchable(pinned) {
-                Some(fraction) if fits(fraction, cost, self.config.freeze_cap) => {
+            ProviderQuotaPolicy::PinnedFreeze => match self.dispatchable(state, pinned, now) {
+                Some(fraction) if fits(fraction, cost, self.config.pinned_cap_for(pinned)) => {
                     Decision::Dispatch(pinned)
                 }
                 _ => Decision::Freeze {
@@ -485,9 +590,9 @@ impl QuotaBroker {
         let cfg = self.config;
         let mut headroom: Vec<(Provider, f32)> = Provider::ALL
             .into_iter()
-            .filter_map(|p| state.dispatchable(p).map(|f| (p, f)))
-            .filter(|(_, f)| fits(*f, cost, cfg.hard_cap))
-            .map(|(p, f)| (p, cfg.hard_cap - f))
+            .filter_map(|p| self.dispatchable(state, p, now).map(|f| (p, f)))
+            .filter(|(p, f)| fits(*f, cost, cfg.hard_cap_for(*p)))
+            .map(|(p, f)| (p, cfg.hard_cap_for(p) - f))
             .collect();
         if headroom.is_empty() {
             let resume_at = Provider::ALL
@@ -533,7 +638,8 @@ impl QuotaBroker {
     /// window must have reset (so the latest of those resets governs) and
     /// enough reservations must have aged out or expired. Usage with no future reset
     /// (credit budget, local estimate, stale window) can next change at the
-    /// next poll. `None` if waiting cannot help.
+    /// next poll, as can unknown usage; a stale provider is due now. `None` if
+    /// waiting cannot help: it needs sign-in or the cost is above its cap.
     fn room_again_at(
         &self,
         state: &State,
@@ -541,10 +647,19 @@ impl QuotaBroker {
         cost: f32,
         now: DateTime<Utc>,
     ) -> Option<DateTime<Utc>> {
-        state.dispatchable(provider)?;
-        let entry = state.providers.get(&provider)?;
+        let cap = self.config.hard_cap_for(provider);
+        let entry = state.providers.get(&provider);
+        if entry.is_some_and(|p| p.needs_sign_in) || !fits(0.0, cost, cap) {
+            return None;
+        }
+        let Some(entry) = entry.filter(|_| !self.is_stale(state, provider, now)) else {
+            return Some(now);
+        };
         let interval = self.interval(provider);
         let next_poll = entry.last_polled.map_or(now, |at| at + interval).max(now);
+        if used_fraction(entry).is_none() {
+            return Some(next_poll);
+        }
         let usage: Vec<(f32, DateTime<Utc>)> = usage_sources(entry)
             .into_iter()
             .map(|(f, reset)| (f, reset.filter(|at| *at > now).unwrap_or(next_poll)))
@@ -575,7 +690,7 @@ impl QuotaBroker {
                 .filter(|(_, at)| at > t)
                 .map(|(f, _)| f)
                 .sum();
-            fits(used + inflight, cost, self.config.hard_cap)
+            fits(used + inflight, cost, cap)
         })
     }
 
@@ -600,25 +715,27 @@ impl QuotaBroker {
 
     /// Read-only `quota_status` payload, kept under 550 bytes.
     pub fn status_payload(&self) -> Value {
+        let now = self.clock.now();
         let state = self.lock_state();
         let mut providers = serde_json::Map::new();
         for p in Provider::ALL {
             let entry = state.providers.get(&p);
             let used = entry.and_then(used_fraction);
             let mut obj = serde_json::Map::new();
-            obj.insert(
-                "used".into(),
-                used.map_or(Value::Null, |f| json!((f * 100.0).round() / 100.0)),
-            );
-            obj.insert(
-                "inflight".into(),
-                json!((state.inflight(p) * 100.0).round() / 100.0),
-            );
+            obj.insert("used".into(), used.map_or(Value::Null, |f| percent(f)));
+            obj.insert("inflight".into(), percent(state.inflight(p)));
             if let Some(c) = entry
                 .and_then(|e| e.reading.as_ref())
                 .and_then(|r| r.credit_budget_fraction)
             {
-                obj.insert("credit".into(), json!((c * 100.0).round() / 100.0));
+                obj.insert("credit".into(), percent(c));
+            }
+            if self.config.provider_hard_caps[p as usize].is_some() {
+                let cap = self.config.hard_cap_for(p);
+                obj.insert("cap".into(), percent(cap));
+            }
+            if used.is_some() && self.is_stale(&state, p, now) {
+                obj.insert("stale".into(), json!(true));
             }
             if entry.is_some_and(|e| e.needs_sign_in) {
                 obj.insert("signIn".into(), json!(true));
@@ -630,8 +747,8 @@ impl QuotaBroker {
         }
         json!({
             "active": state.active,
-            "hard": self.config.hard_cap,
-            "soft": self.config.soft_cap,
+            "hard": percent(self.config.hard_cap),
+            "soft": percent(self.config.soft_cap),
             "providers": providers,
         })
     }
@@ -681,6 +798,18 @@ mod tests {
             }],
             credit_budget_fraction: None,
         })
+    }
+
+    fn rig_with(config: BrokerConfig) -> (QuotaBroker, Arc<MockClock>, Readings) {
+        let clock = Arc::new(MockClock::new(Utc::now()));
+        let readings: Readings = Arc::default();
+        let broker = QuotaBroker::new(
+            config,
+            Box::new(SharedClock(clock.clone())),
+            Box::new(FakeProbe(readings.clone(), Arc::default())),
+            Box::new(FakeFallback(None)),
+        );
+        (broker.unwrap(), clock, readings)
     }
 
     fn rig(
@@ -849,7 +978,10 @@ mod tests {
         let (b, _c, _r, _) = rig(None);
         assert_eq!(
             b.decide(ProviderQuotaPolicy::BalancedFailover, Provider::Codex),
-            Decision::PauseAll { resume_at: None }
+            Decision::PauseAll {
+                resume_at: Some(_c.now())
+            },
+            "a poll is due now"
         );
         assert_eq!(
             b.dispatch(ProviderQuotaPolicy::PinnedFreeze, Provider::Codex, 0.0),
@@ -1043,6 +1175,160 @@ mod tests {
                 assert_eq!(balanced(&b), Decision::Dispatch(Provider::ClaudeCode));
             }
         }
+    }
+
+    fn capped(codex: f32) -> BrokerConfig {
+        BrokerConfig {
+            provider_hard_caps: [None, None, Some(codex)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn balanced_holds_each_provider_to_its_own_hard_cap() {
+        let (b, clock, readings) = rig_with(capped(0.80));
+        let t = clock.now();
+        let later = Some(t + chrono::Duration::minutes(60));
+        put(
+            &readings,
+            Provider::Antigravity,
+            vec![window(0.9, later)],
+            None,
+        );
+        put(
+            &readings,
+            Provider::ClaudeCode,
+            vec![window(0.9, later)],
+            None,
+        );
+        put(
+            &readings,
+            Provider::Codex,
+            vec![window(0.81, Some(t + chrono::Duration::minutes(5)))],
+            None,
+        );
+        b.set_orchestration_active(true);
+        b.poll_due();
+        // Under the global 0.85 but over codex's own 0.80.
+        assert_eq!(resume_at(&b, 0.0), Some(t + chrono::Duration::minutes(5)));
+        assert_eq!(resume_at(&b, 0.86), None, "above every cap");
+
+        let (b, _c, readings) = rig_with(capped(0.89));
+        set(&readings, 0.9, 0.9, 0.87);
+        b.set_orchestration_active(true);
+        b.poll_due();
+        assert_eq!(balanced(&b), Decision::Dispatch(Provider::Codex));
+    }
+
+    #[test]
+    fn pinned_freezes_at_the_providers_own_cap_else_the_freeze_cap() {
+        let (b, _c, readings) = rig_with(capped(0.80));
+        set(&readings, 0.0, 0.87, 0.81);
+        b.set_orchestration_active(true);
+        b.poll_due();
+        let pinned = |p| b.decide(ProviderQuotaPolicy::PinnedFreeze, p);
+        assert!(matches!(pinned(Provider::Codex), Decision::Freeze { .. }));
+        assert_eq!(
+            pinned(Provider::ClaudeCode),
+            Decision::Dispatch(Provider::ClaudeCode)
+        );
+    }
+
+    #[test]
+    fn reactivation_requires_a_new_poll_before_dispatch() {
+        let (b, clock, readings, _) = rig(None);
+        set(&readings, 0.1, 0.1, 0.1);
+        b.set_orchestration_active(true);
+        b.poll_due();
+        b.set_orchestration_active(false);
+        b.set_orchestration_active(true);
+        let now = Some(clock.now());
+        assert_eq!(resume_at(&b, 0.0), now);
+        assert!(matches!(
+            b.decide(ProviderQuotaPolicy::PinnedFreeze, Provider::Codex),
+            Decision::Freeze { .. }
+        ));
+        assert_eq!(b.poll_due().len(), 3, "all due again");
+        assert!(matches!(balanced(&b), Decision::Dispatch(_)));
+        // Repeating "active" is not a reactivation.
+        b.set_orchestration_active(true);
+        assert!(matches!(balanced(&b), Decision::Dispatch(_)));
+    }
+
+    #[test]
+    fn stale_readings_take_no_new_work() {
+        let (b, clock, readings, _) = rig(None);
+        set(&readings, 0.9, 0.9, 0.1);
+        b.set_orchestration_active(true);
+        b.poll_due();
+        clock.advance(Duration::from_secs(270));
+        assert_eq!(balanced(&b), Decision::Dispatch(Provider::Codex));
+        clock.advance(Duration::from_secs(1));
+        // Codex and claude are past three intervals; agy (180 s) is not.
+        assert_eq!(resume_at(&b, 0.0), Some(clock.now()));
+        assert_eq!(b.status_payload()["providers"]["codex"]["stale"], true);
+    }
+
+    #[test]
+    fn unknown_usage_resumes_at_the_next_poll_and_sign_in_never_does() {
+        let (b, clock, readings, _) = rig(None);
+        b.set_orchestration_active(true);
+        b.poll_due();
+        assert_eq!(
+            resume_at(&b, 0.0),
+            Some(clock.now() + chrono::Duration::seconds(90))
+        );
+        for p in Provider::ALL {
+            readings
+                .lock()
+                .unwrap()
+                .insert(p, Err(ProbeError::NeedsSignIn));
+        }
+        clock.advance(Duration::from_secs(180));
+        b.poll_due();
+        assert_eq!(resume_at(&b, 0.0), None);
+    }
+
+    #[test]
+    fn config_bounds_poll_intervals_and_the_reservation_ttl() {
+        let secs = Duration::from_secs;
+        let with = |poll, agy, ttl| BrokerConfig {
+            poll_interval: poll,
+            agy_poll_interval: agy,
+            reservation_ttl: ttl,
+            ..Default::default()
+        };
+        assert!(with(secs(90), secs(180), secs(181)).validate().is_ok());
+        assert!(
+            with(MAX_POLL_INTERVAL, MAX_POLL_INTERVAL, MAX_RESERVATION_TTL)
+                .validate()
+                .is_ok()
+        );
+        for ttl in [
+            Duration::ZERO,
+            secs(90),
+            secs(180),
+            MAX_RESERVATION_TTL + secs(1),
+            Duration::MAX,
+        ] {
+            assert_eq!(
+                with(secs(90), secs(180), ttl).validate(),
+                Err(InvalidBrokerConfig::ReservationTtl { ttl })
+            );
+        }
+        for interval in [Duration::ZERO, MAX_POLL_INTERVAL + secs(1), Duration::MAX] {
+            for config in [
+                with(interval, secs(180), secs(600)),
+                with(secs(90), interval, secs(600)),
+            ] {
+                assert_eq!(
+                    config.validate(),
+                    Err(InvalidBrokerConfig::PollInterval { interval })
+                );
+            }
+        }
+        assert!(capped(0.78).validate().is_err());
+        assert!(capped(0.90).validate().is_err());
     }
 
     #[test]
@@ -1343,6 +1629,35 @@ mod tests {
         b.reserve(Provider::Antigravity, 0.6);
         let payload = serde_json::to_string(&b.status_payload()).unwrap();
         assert!(payload.len() < 550, "{} bytes", payload.len());
+    }
+
+    #[test]
+    fn worst_case_payload_stays_under_550_bytes() {
+        // Every optional field at once, with two-decimal values everywhere.
+        let (b, clock, readings) = rig_with(BrokerConfig {
+            provider_hard_caps: [Some(0.87); 3],
+            ..Default::default()
+        });
+        for p in Provider::ALL {
+            put(&readings, p, vec![window(0.87, None)], Some(0.87));
+        }
+        b.set_orchestration_active(true);
+        b.poll_due();
+        for p in Provider::ALL {
+            b.reserve(p, 0.87);
+        }
+        {
+            let mut state = b.state.lock().unwrap();
+            for entry in state.providers.values_mut() {
+                entry.needs_sign_in = true;
+            }
+        }
+        clock.advance(Duration::from_secs(599));
+        let payload = serde_json::to_string(&b.status_payload()).unwrap();
+        for key in ["cap", "stale", "signIn", "credit", "inflight"] {
+            assert_eq!(payload.matches(&format!("\"{key}\":")).count(), 3, "{key}");
+        }
+        assert!(payload.len() < 550, "{} bytes: {payload}", payload.len());
     }
 
     #[test]

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use mast_proto::ProviderQuotaPolicy;
 use serde::{Deserialize, Serialize};
 
-use crate::quota_broker::{BrokerConfig, InvalidBrokerConfig};
+use crate::quota_broker::{BrokerConfig, InvalidBrokerConfig, Provider};
 
 const FILE_NAME: &str = "quota-settings.json";
 
@@ -64,7 +64,7 @@ impl QuotaSettings {
                 && self.soft_cap < *cap
                 && *cap < self.freeze_cap;
             if !fits {
-                return Err(InvalidBrokerConfig {
+                return Err(InvalidBrokerConfig::Caps {
                     soft_cap: self.soft_cap,
                     hard_cap: *cap,
                     freeze_cap: self.freeze_cap,
@@ -82,11 +82,15 @@ impl QuotaSettings {
             .unwrap_or(self.hard_cap)
     }
 
-    /// Set the three caps on `config`; everything else is left alone.
+    /// Set the caps on `config`, per-provider ones included; everything else
+    /// is left alone. Entries for ids the broker does not dispatch to are
+    /// ignored.
     pub fn apply_to(&self, config: &mut BrokerConfig) {
         config.soft_cap = self.soft_cap;
         config.hard_cap = self.hard_cap;
         config.freeze_cap = self.freeze_cap;
+        config.provider_hard_caps = Provider::ALL
+            .map(|provider| self.provider_hard_caps.get(provider.harness_id()).copied());
     }
 }
 
@@ -275,6 +279,12 @@ mod tests {
     fn apply_to_sets_only_the_caps() {
         let mut config = BrokerConfig::default();
         custom().apply_to(&mut config);
+        assert_eq!(config.hard_cap_for(Provider::Codex), 0.75);
+        assert_eq!(config.hard_cap_for(Provider::ClaudeCode), 0.70);
+        // Re-applying without an override clears the old one.
+        let mut cleared = config;
+        QuotaSettings::default().apply_to(&mut cleared);
+        assert_eq!(cleared.provider_hard_caps, [None; 3]);
         assert_eq!(
             (config.soft_cap, config.hard_cap, config.freeze_cap),
             (0.60, 0.70, 0.80)
