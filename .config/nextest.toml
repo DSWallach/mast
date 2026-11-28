@@ -41,6 +41,10 @@ fsevents-heavy = { max-threads = 1 }
 # tests one at a time; `threads-required = "num-test-threads"` below also keeps every other test
 # from running beside them.
 provenance-budget = { max-threads = 1 }
+# mutations_stay_fast_on_a_large_local_registry asserts a latency threshold on a 46 s CPU-heavy
+# workload, so it is both the first victim of load and a load source for the tail of a run
+# (a manager hand-off test timed out beside it). Run it alone, like provenance_budget.
+latency-sensitive = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = '(binary(engine) & test(/^managed_accounts::/)) | (binary(engine) & test(/^m5_repos_diffs_terminals::/)) | (binary(engine) & test(/^pr_ticket_cache_login_shell::/))'
@@ -79,6 +83,21 @@ threads-required = 'num-test-threads'
 [[profile.quarantine.overrides]]
 filter = 'binary(engine) & test(/^provenance_budget::/)'
 test-group = 'provenance-budget'
+threads-required = 'num-test-threads'
+
+[[profile.default.overrides]]
+filter = 'binary(engine) & test(/^work_outline_rpc::mutations_stay_fast_on_a_large_local_registry$/)'
+test-group = 'latency-sensitive'
+threads-required = 'num-test-threads'
+
+[[profile.release.overrides]]
+filter = 'binary(engine) & test(/^work_outline_rpc::mutations_stay_fast_on_a_large_local_registry$/)'
+test-group = 'latency-sensitive'
+threads-required = 'num-test-threads'
+
+[[profile.quarantine.overrides]]
+filter = 'binary(engine) & test(/^work_outline_rpc::mutations_stay_fast_on_a_large_local_registry$/)'
+test-group = 'latency-sensitive'
 threads-required = 'num-test-threads'
 
 [profile.default]

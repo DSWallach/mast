@@ -391,7 +391,10 @@ fn service(rig: &Rig) -> WorkItemLaunchService {
 }
 
 async fn wait_for(mut predicate: impl FnMut() -> bool, what: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    // Only a failure bound: every caller waits on a condition, never a duration. It is
+    // wide because a loaded run starves background tasks (the hand-off watcher retries on
+    // a one-second tick) for well over the 15 s that once sufficed.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     while !predicate() {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -2374,6 +2377,9 @@ async fn manager_asked_for_status(rig: &Rig, op: &str) -> (String, Evaluations) 
     let evaluations = Evaluations::watch(&rig.core, &source);
     rig.mock.hold_matching(None);
     rig.mock.release();
+    // The watcher judges the threshold turn first; the nudge is queued as part
+    // of that judgement. Waiting on the judged event names the stage that stalls.
+    evaluations.wait_for_more_than(0, "the threshold turn to be judged").await;
     wait_for(|| status_nudges(&rig.mock) == 1, "status request").await;
     settle(rig, &source).await;
     wait_for(|| checkpoint_records(&rig.root).contains_key(&source), "durable checkpoint").await;

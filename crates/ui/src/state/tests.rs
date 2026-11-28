@@ -1667,8 +1667,10 @@ fn answer_outline_watches(
     let mut asked = Vec::new();
     while let Ok(frame) = requests.try_recv() {
         let request: serde_json::Value = serde_json::from_str(&frame).unwrap();
-        // Artifacts follow the same watch set; their tests answer them.
-        if request["method"] == methods::WATCH_ARTIFACTS {
+        // Artifacts and build jobs follow the same watch set; their tests answer them.
+        if request["method"] == methods::WATCH_ARTIFACTS
+            || request["method"] == methods::WATCH_BUILD_JOBS
+        {
             continue;
         }
         assert_eq!(request["method"], methods::WATCH_WORK_OUTLINE);

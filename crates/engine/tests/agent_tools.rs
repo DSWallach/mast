@@ -9140,7 +9140,7 @@ async fn a_projects_worker_model_applies_to_the_managers_next_worker_and_survive
     let (rig, p) = manager_rig().await;
     let (_lease, token) = mint_token(&rig, CHAT);
     let args = |key: &str| json!({
-        "idempotencyKey": key, "workItemId": p.ticket, "prompt": "go",
+        "idempotencyKey": key, "workItemId": p.ticket, "prompt": "go", "newChat": true,
         "harnessOmitted": true, "modelOmitted": true,
         "config": { "harness": "mock", "model": null, "reasoning": null,
                     "modelOptions": {}, "sandbox": "read-only", "autoApprove": false },
