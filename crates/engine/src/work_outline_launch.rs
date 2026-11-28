@@ -2228,7 +2228,7 @@ No active workers.");
                 .filter(|other| snapshot.is_within(&lead_item, &other.id))
                 // Only items a live Worker is running on hold a share.
                 .filter(|other| {
-                    snapshot.listed_chat_ids(other).any(|id| chats.iter().any(|chat| chat.id == id && !chat.archived))
+                    snapshot.listed_chat_ids(other).any(|id| chats.iter().any(|chat| chat.id == *id && !chat.archived))
                 })
                 .filter_map(|other| specs.get(&other.id))
                 .map(|s| s.item_budget.clone())
