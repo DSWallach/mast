@@ -27,6 +27,11 @@ pub(crate) fn validate_build_argv(argv: &[String]) -> Result<(), &'static str> {
     }) {
         return Err("build command must be a nonempty argv without shell operators");
     }
+    // The slot owns the cache directory (the queue's disk gates and slot locks depend on it).
+    if argv.iter().any(|arg| arg == "--target-dir" || arg.starts_with("--target-dir=")
+        || arg.contains("build.target-dir") || arg.contains("build.build-dir")) {
+        return Err("a build command cannot choose its target directory: the slot owns it");
+    }
     let allowed = match argv[0].as_str() {
         "cargo" => matches!(argv.get(1).map(String::as_str),
             Some("test" | "nextest" | "build" | "check" | "clippy")),
@@ -991,7 +996,9 @@ mod tests {
             assert!(validate_build_argv(&words.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_ok());
         }
         for words in [vec!["sh", "-c", "cargo test"], vec!["cargo", "run"],
-            vec!["cargo", "test", "|", "cat"], vec!["/usr/bin/cargo", "test"]] {
+            vec!["cargo", "test", "|", "cat"], vec!["/usr/bin/cargo", "test"],
+            vec!["cargo", "test", "--target-dir", "/tmp/x"], vec!["cargo", "build", "--target-dir=x"],
+            vec!["cargo", "check", "--config", "build.target-dir='x'"]] {
             assert!(validate_build_argv(&words.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
         }
     }

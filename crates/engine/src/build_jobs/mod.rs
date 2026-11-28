@@ -876,6 +876,35 @@ impl BuildJobs {
         })
     }
 
+    /// The engine's own loop: [`recover`](Self::recover) once, then [`spawn`](Self::spawn)'s
+    /// loop with `before_pass` run ahead of every pass. Nothing here blocks the caller, so an
+    /// unreachable host never delays engine startup.
+    pub fn serve(
+        &self,
+        before_pass: impl Fn(&BuildJobs) + Send + Sync + 'static,
+    ) -> tokio::task::JoinHandle<()> {
+        let this = self.clone();
+        let before_pass = Arc::new(before_pass);
+        tokio::spawn(async move {
+            let recovering = this.clone();
+            match tokio::task::spawn_blocking(move || recovering.recover()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "build queue recovery failed"),
+                Err(error) => tracing::warn!(%error, "build queue recovery panicked"),
+            }
+            loop {
+                let (pass, hook) = (this.clone(), before_pass.clone());
+                let _ = tokio::task::spawn_blocking(move || {
+                    hook(&pass);
+                    pass.tick();
+                })
+                .await;
+                let wait = std::time::Duration::from_millis(this.inner.cfg.tick_ms);
+                let _ = tokio::time::timeout(wait, this.inner.notify.notified()).await;
+            }
+        })
+    }
+
     fn tick_host(&self, host: &HostProfile, now: i64) {
         let Some(executor) = self.inner.executors.get(&host.id) else {
             return;

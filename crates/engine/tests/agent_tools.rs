@@ -272,12 +272,18 @@ async fn rig_for(fake_codex: bool) -> Rig {
 }
 
 async fn rig_with_harness(harness: GatedHarness) -> Rig {
+    rig_in_data_dir(harness, |_| {}).await
+}
+/// `prepare` writes into the engine's data dir before the engine is assembled.
+async fn rig_in_data_dir(harness: GatedHarness, prepare: impl FnOnce(&std::path::Path)) -> Rig {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let space_path = root.join("project");
     std::fs::create_dir_all(&space_path).unwrap();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(harness.clone()));
+    std::fs::create_dir_all(root.join("data")).unwrap();
+    prepare(&root.join("data"));
     let core = EngineCore::assemble(
         &root.join("data"),
         Arc::new(registry),
@@ -11620,4 +11626,99 @@ async fn a_build_matching_a_space_rule_queues_at_once_and_counts_one_hit() {
     let snapshot = mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE));
     assert_eq!(snapshot.space_settings.approval_rules[0].hit_count, 1);
     assert!(snapshot.space_settings.approval_rules[0].last_used_at.is_some());
+}
+
+// Build queue startup: what engine assembly does with `<data dir>/build-queue.json`.
+
+async fn rig_with_build_settings(settings: Option<Value>) -> Rig {
+    rig_in_data_dir(GatedHarness::default(), |data| {
+        if let Some(settings) = settings {
+            std::fs::write(data.join("build-queue.json"), settings.to_string()).unwrap();
+        }
+    })
+    .await
+}
+
+fn build_settings() -> Value {
+    let checkout = std::fs::canonicalize(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).unwrap();
+    // Nothing here ever reaches the alias: only jobs that are queued or running contact the host.
+    json!({ "enabled": true, "checkout": checkout, "host": {
+        "id": "desktop", "sshAlias": "mast-test-build-host", "repo": "Work/mast",
+        "checkoutPrefix": "Work/mast-wt-build-", "targetPrefix": "Work/mast-target-", "maxRunners": 1,
+        "slots": [{ "name": "a", "incremental": true }], "startMode": "admit" } })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_without_a_usable_build_profile_says_why_the_build_tools_are_unavailable() {
+    for (settings, why) in [
+        (None, "not configured"),
+        (Some(json!({ "enabled": false })), "disabled in"),
+        (Some(json!({ "enabled": true })), "checkout must be an absolute path"),
+        (Some({ let mut s = build_settings(); s["host"].as_object_mut().unwrap().remove("sshAlias"); s }), "missing field `sshAlias`"),
+        (Some({ let mut s = build_settings(); s["host"]["sshAlias"] = json!("me@10.0.0.1"); s }), "is not an alias"),
+    ] {
+        let rig = rig_with_build_settings(settings).await;
+        assert!(rig.core.build_jobs().is_err(), "{why}");
+        let owner = rig.core.sessions.agent_tokens().mint(CHAT, "run-build", SPACE, &rig.core.device_id);
+        let error = tool(&rig, owner.token(), "build_list", json!({})).await.unwrap_err();
+        assert!(error.contains("build queue is unavailable") && error.contains(why), "{why}: {error}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_configured_engine_runs_one_queue_for_every_surface_and_applies_a_declined_approval() {
+    use mast_proto::work_outline::WorkOutlineMutation;
+    let rig = rig_with_build_settings(Some(build_settings())).await;
+    let jobs = rig.core.build_jobs().expect("a configured queue").clone();
+    assert_eq!(jobs.config().default_host, "desktop");
+    assert_eq!(jobs.config().hosts.len(), 1, "no host is added by default");
+    let item = create_item(&rig, "build-item", "Build", None).await;
+    assign_chat(&rig, "build-assign", CHAT, &item).await;
+    let owner = rig.core.sessions.agent_tokens().mint(CHAT, "run-build", SPACE, &rig.core.device_id);
+    // The agent cannot word, or reword, a build approval card itself.
+    let spoof = tool(&rig, owner.token(), "work_outline_create_user_action_request",
+        json!({ "request": "Approve a harmless check", "dedupeKey": "build:anything" })).await.unwrap_err();
+    assert!(spoof.contains("reserved"), "{spoof}");
+    // A remote build needs a commit; this chat's directory has none.
+    let no_commit = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "n1", "argv": ["cargo", "check"] })).await.unwrap_err();
+    assert!(no_commit.contains("headSha is required"), "{no_commit}");
+    let script = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "n2", "argv": ["scripts/ui-flow.sh"], "headSha": "abc1234" })).await.unwrap_err();
+    assert!(script.contains("only cargo commands"), "{script}");
+    let queued = tool(&rig, owner.token(), "build_enqueue",
+        json!({ "idempotencyKey": "c1", "argv": ["cargo", "check"], "headSha": "abc1234", "label": "harmless" })).await.unwrap();
+    let job_id = queued["job"]["jobId"].as_str().unwrap().to_owned();
+    assert_eq!(queued["job"]["state"], "awaiting_approval");
+    assert_eq!(jobs.get(&job_id).unwrap().host, "desktop");
+    // Another RPC surface of the same engine sees the same queue.
+    let second = mast_rpc::memory_client(rig.core.rpc_service());
+    let listed = second.call(mast_proto::agent_tools::TOOL_CALL_METHOD,
+        json!({ "token": owner.token(), "tool": "build_list", "arguments": {} })).await.unwrap();
+    assert_eq!(listed["jobs"][0]["jobId"], job_id.as_str());
+    let request = queued["approvalRequestId"].as_str().unwrap().to_owned();
+    let card = rig.core.workspace.work_outline_inputs(SPACE);
+    let card = mast_doc::materialize_work_outline(SPACE, &card).user_action_requests.into_iter().find(|r| r.id == request).unwrap();
+    assert_eq!(card.text, "Approve build: cargo check", "the title is the command, not the label");
+    // The engine's own loop applies the answer; no build tool is called.
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::ResolveUserActionRequest(mast_proto::work_outline_user_actions::ResolveUserActionRequestParams {
+        outcome: Some("declined".into()), values: None, via: Some("card".into()), user_action_request_id: request, note: None, answer: None, operation_id: "build-decline".into(),
+    }), &user_actor(&rig), &[]).unwrap();
+    for _ in 0..100 {
+        if jobs.get(&job_id).unwrap().state == mast_engine::build_jobs::JobState::Cancelled {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(jobs.get(&job_id).unwrap().state, mast_engine::build_jobs::JobState::Cancelled);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_build_nobody_could_approve_is_refused_instead_of_queued() {
+    let rig = rig().await;
+    let jobs = build_queue(&rig);
+    configure_command_chat(&rig, CHAT, command_config(false, false, SandboxLevel::WorkspaceWrite));
+    let owner = rig.core.sessions.agent_tokens().mint(CHAT, "run-build", SPACE, &rig.core.device_id);
+    let error = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "x", "argv": ["cargo", "check"] })).await.unwrap_err();
+    assert!(error.contains("no work item"), "{error}");
+    assert!(jobs.list(&Default::default()).unwrap().is_empty());
 }

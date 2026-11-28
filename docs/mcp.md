@@ -137,7 +137,7 @@ A project Manager can reach chats in its managed project, including archived cha
 
 ### Build queue: `build_*`
 
-Six compact tools queue and follow builds on the shared build queue (`build_jobs`), so a chat does not run Cargo itself. Each schema is under 600 bytes. They are visible to Worker, Verifier and coordinator chats; the queue must be configured on the engine, otherwise every call fails with "build queue is unavailable".
+Six compact tools queue and follow builds on the shared build queue (`build_jobs`), so a chat does not run Cargo itself. Each schema is under 600 bytes. They are visible to Worker, Verifier and coordinator chats; the queue must be configured on the engine, otherwise every call fails with "build queue is unavailable: <reason>" (not configured, disabled, or what is wrong with the profile).
 
 | Tool | Purpose | Scoping |
 |---|---|---|
@@ -148,9 +148,38 @@ Six compact tools queue and follow builds on the shared build queue (`build_jobs
 | `build_log {jobId, offset?, maxBytes?}` | A byte window of the job log (default 8 KiB, at most 64 KiB) and `nextOffset`. | Attached chats only. |
 | `build_cancel {jobId}` | Cancel a queued or running job. | Attached chats only. |
 
-`argv` is run directly: no shell, no pipes or redirection. Only `cargo test|nextest|build|check|clippy`, `scripts/ui-preview.sh` and `scripts/ui-flow.sh` are accepted. `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` belong to the slot.
+`argv` is run directly: no shell, no pipes or redirection. Only `cargo test|nextest|build|check|clippy`, `scripts/ui-preview.sh` and `scripts/ui-flow.sh` are accepted. `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` belong to the slot, so `--target-dir` and a `--config` that sets the build directory are refused. A remote host accepts only `cargo` commands and builds a commit: `headSha` defaults to the commit checked out in `cwd`, uncommitted changes are not built, and the commit must already be on the host.
 
-**Approval.** The command text is matched against the Space's enabled `ApprovalRule`s with the same matcher as harness command prompts. A match queues the job at once and counts as a use of the rule: its `hitCount` and `lastUsedAt` advance. With no match the job waits in `awaiting_approval` and an Approve Required Action (`dedupeKey` `build:<jobId>`) is raised on the chat's work item. When the user approves it the job is queued; any other resolution cancels it. The outcome is applied the next time the chat calls a `build_*` tool. A chat with no work item cannot raise the request and the job stays in `awaiting_approval` until it is approved in the UI.
+**Approval.** The command text is matched against the Space's enabled `ApprovalRule`s with the same matcher as harness command prompts. A match queues the job at once and counts as a use of the rule: its `hitCount` and `lastUsedAt` advance. With no match the job waits in `awaiting_approval` and an Approve Required Action (`dedupeKey` `build:<jobId>`) is raised on the chat's work item. When the user approves it the job is queued; any other resolution cancels it. The engine's queue loop applies the answer within a few seconds. The card's title and body come from the job alone (the `label` is not shown) and always hold the whole command; an approval counts only while the card still shows exactly that. The `build:` dedupe prefix is reserved for these cards. With no matching rule, `build_enqueue` is refused for a chat with no work item and for a command too long to show in full.
+
+#### Turning the queue on
+
+The queue is off until `<engine data dir>/build-queue.json` enables it and describes one build host. Every `host` field is required and no host is ever assumed. The engine reads the file at startup.
+
+```json
+{
+  "enabled": true,
+  "checkout": "/home/me/Work/mast",
+  "host": {
+    "id": "desktop",
+    "sshAlias": "desktop",
+    "repo": "Work/mast",
+    "checkoutPrefix": "Work/mast-wt-build-",
+    "targetPrefix": "Work/mast-target-",
+    "maxRunners": 3,
+    "slots": [
+      {"name": "a", "incremental": true},
+      {"name": "b", "incremental": false},
+      {"name": "c", "incremental": false}
+    ],
+    "startMode": "admit"
+  }
+}
+```
+
+`checkout` is an absolute path on the engine's machine; the queue runs its `scripts/remote-cargo.sh`. `sshAlias` must be an ssh alias (no `user@host` or address). `repo`, `checkoutPrefix` and `targetPrefix` are relative to the host's `$HOME`. `maxRunners` is at most the number of slots. `startMode` is `"admit"` (which requires the target prefix above), `"plain"` or `{"deviceSerial": "<serial>"}` (one runner).
+
+**Shared hosts and lost connections.** No engine owns a host. The slot checkout is moved only inside `remote-cargo.sh start`, under the host's slot lock and only while the slot is idle, so another engine, device or hand-run start gets `slot X busy` and cannot move a checkout under a running job. When the answer to a start is lost, the engine fences that attempt on the host (`remote-cargo.sh fence`) before it queues the job again: a fenced attempt can never run, even if its start command arrives late. While the host is unreachable the job stays `running`. These guarantees cover starts made with this version of the script.
 
 ### Role-scoped catalog and `quota_status`
 

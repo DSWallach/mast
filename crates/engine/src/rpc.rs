@@ -420,24 +420,6 @@ impl EngineRpc {
             work_outline.clone(),
             Some(doc_host.clone()),
         ).with_peer_data_dir(repos.data_dir().to_path_buf()));
-        {
-            struct DocWake(crate::doc_host::DocHost);
-            impl crate::build_jobs::WakeSink for DocWake {
-                fn deliver(&self, chat_id: &str, text: &str, message_id: &str) -> Result<(), String> {
-                    self.0.queue_event_message(chat_id, text, message_id).map(|_| ()).map_err(|e| e.to_string())
-                }
-            }
-            match crate::build_jobs::startup::open(repos.data_dir(), std::sync::Arc::new(DocWake(doc_host.clone()))) {
-                Ok(Some(jobs)) => {
-                    if tokio::runtime::Handle::try_current().is_ok() {
-                        jobs.spawn();
-                    }
-                    agent_tools.set_build_jobs(jobs);
-                }
-                Ok(None) => {}
-                Err(reason) => tracing::warn!(%reason, "build queue is unavailable"),
-            }
-        }
         agent_tools.set_sessions(sessions.clone());
         agent_tools.recover_command_runs();
         agent_tools.set_diff_targets(diff_targets.clone());
@@ -515,16 +497,24 @@ impl EngineRpc {
         }
     }
 
-    /// Attach the engine's one build queue (the `build_*` agent tools and the Builds panel).
+    /// Test hook: put a queue with test executors behind this surface's `build_*` tools. It does
+    /// not feed the Builds panel; the engine uses [`Self::with_build_jobs`], which does both.
+    #[doc(hidden)]
+    pub fn set_build_jobs(&self, jobs: crate::build_jobs::BuildJobs) {
+        self.agent_tools.set_build_jobs(jobs);
+    }
+
+    /// Attach the engine's one build queue: the `build_*` agent tools and the Builds panel.
     pub(crate) fn with_build_jobs(mut self, jobs: crate::build_jobs::BuildJobs) -> Self {
         self.agent_tools.set_build_jobs(jobs.clone());
         self.build_jobs = Some(jobs);
         self
     }
 
-    /// Attach the build queue the `build_*` agent tools use.
-    pub fn set_build_jobs(&self, jobs: crate::build_jobs::BuildJobs) {
-        self.agent_tools.set_build_jobs(jobs);
+    /// Say why this engine has no build queue; the `build_*` tools answer with it.
+    pub(crate) fn without_build_jobs(self, reason: &crate::build_jobs::startup::Unavailable) -> Self {
+        self.agent_tools.set_build_queue_unavailable(reason.to_string());
+        self
     }
 
     /// Share the engine's artifact service (render broker, watcher cache)

@@ -1080,6 +1080,53 @@ fn build_job_view(job: &crate::build_jobs::Job) -> Value {
         "reason":job.reason,"slot":job.slot})
 }
 
+/// Which engine-reserved user request a caller is allowed to raise.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReservedCard {
+    None,
+    RuleProposal,
+    Build,
+}
+
+/// Dedupe keys only the engine's own build approval cards may use.
+const BUILD_APPROVAL_KEY_PREFIX: &str = "build:";
+
+/// The body of a build approval card: what the user is approving, in full.
+fn build_approval_detail(job: &crate::build_jobs::Job) -> String {
+    format!("Build job {} on {} in {} at {}:\n{}", job.id, job.host, job.cwd,
+        job.head_sha.as_deref().unwrap_or("the working tree"), shell_words::join(&job.argv))
+}
+
+/// The commit checked out in `dir`.
+fn checked_out_commit(dir: &std::path::Path) -> Option<String> {
+    let out = mast_harness::command("git").arg("-C").arg(dir).args(["rev-parse", "--verify", "HEAD"]).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// Apply the user's answers to `awaiting_approval` build jobs: approved queues, any other
+/// resolution cancels. Called by the engine's queue loop and ahead of every `build_*` tool.
+pub(crate) fn apply_build_approvals(jobs: &crate::build_jobs::BuildJobs, workspace: &WorkspaceHost) {
+    let filter = crate::build_jobs::ListFilter { active_only: true, ..Default::default() };
+    let Ok(active) = jobs.list(&filter) else { return };
+    let mut snapshots = std::collections::HashMap::new();
+    for job in active.into_iter().filter(|j| j.state == crate::build_jobs::JobState::AwaitingApproval) {
+        let snapshot = snapshots.entry(job.space_id.clone()).or_insert_with(|| {
+            mast_doc::materialize_work_outline(&job.space_id, &workspace.work_outline_inputs(&job.space_id))
+        });
+        let key = format!("build:{}", job.id);
+        let Some(request) = snapshot.user_action_requests.iter().find(|r| r.dedupe_key.as_deref() == Some(key.as_str()) && r.chat_id == job.chat_id && !r.is_open()) else { continue };
+        let Some(resolution) = &request.resolution else { continue };
+        let by_user = resolution.by.kind == mast_proto::WorkOutlineActorKind::User;
+        // Only the user approves, and only a card that still shows exactly this job's command.
+        let shown = request.info.as_deref() == Some(build_approval_detail(&job).as_str());
+        let _ = if by_user && shown && resolution.outcome.as_deref() == Some("approved") {
+            jobs.approve(&job.id).map(|_| ())
+        } else {
+            jobs.deny(&job.id, "approval was declined").map(|_| ())
+        };
+    }
+}
+
 /// The engine's agent RPC surface (one per `EngineRpc`).
 pub struct AgentToolsService {
     tokens: Arc<AgentTokens>,
@@ -1109,7 +1156,8 @@ pub struct AgentToolsService {
     /// Agent archives, for Recent changes / undo in the UI.
     archive_log: crate::archivable::AgentArchiveLog,
     command_runs: command_run::CommandRuns,
-    build_jobs: Mutex<Option<crate::build_jobs::BuildJobs>>,
+    /// The engine's build queue, or why there is none.
+    build_jobs: Mutex<Result<crate::build_jobs::BuildJobs, String>>,
     peer_data_dir: Option<std::path::PathBuf>,
 }
 
@@ -1138,13 +1186,17 @@ impl AgentToolsService {
             diff_targets: Mutex::new(None),
             diff_sync: Mutex::new(None),
             command_runs: command_run::CommandRuns::default(),
-            build_jobs: Mutex::new(None),
+            build_jobs: Mutex::new(Err("no build queue is attached to this engine".into())),
             peer_data_dir: None,
         }
     }
 
     pub fn set_build_jobs(&self, jobs: crate::build_jobs::BuildJobs) {
-        *lock(&self.build_jobs) = Some(jobs);
+        *lock(&self.build_jobs) = Ok(jobs);
+    }
+
+    pub(crate) fn set_build_queue_unavailable(&self, reason: String) {
+        *lock(&self.build_jobs) = Err(reason);
     }
 
     pub(crate) fn with_peer_data_dir(mut self, dir: std::path::PathBuf) -> Self {
@@ -1686,12 +1738,13 @@ impl AgentToolsService {
     }
 
     fn build_tool(&self, context: &CallContext, tool: &str, arguments: &Value) -> Result<Value, AgentToolError> {
-        let jobs = lock(&self.build_jobs).clone().ok_or_else(|| AgentToolError::invalid("build queue is unavailable"))?;
+        let jobs = lock(&self.build_jobs).clone().map_err(|why| AgentToolError::invalid(format!("build queue is unavailable: {why}")))?;
         let error = |e: crate::build_jobs::BuildJobError| AgentToolError::invalid(e.to_string());
+        // The engine's queue loop applies approvals too; this makes an answer visible at once.
+        apply_build_approvals(&jobs, &self.workspace);
         if tool == "build_enqueue" {
             return self.build_enqueue(context, &jobs, arguments);
         }
-        self.sync_build_approvals(context, &jobs);
         if tool == "build_list" {
             let filter = crate::build_jobs::ListFilter {
                 chat_id: Some(context.grant.chat_id.clone()), space_id: Some(context.grant.space_id.clone()),
@@ -1741,11 +1794,28 @@ impl AgentToolsService {
         let cwd_text = cwd.to_string_lossy().into_owned();
         let sessions = lock(&self.sessions).clone();
         let rule = sessions.as_ref().and_then(|s| s.match_build_rule(&context.grant.chat_id, &argv, &cwd_text));
+        if rule.is_none() && context.current_item_id().is_none() {
+            return Err(AgentToolError::invalid("no Space approval rule allows this command, and this chat has no work item to raise an approval on"));
+        }
+        let host_id = text("host").unwrap_or_else(|| jobs.config().default_host.clone());
+        let remote = jobs.config().host(&host_id).is_some_and(|h| matches!(h.kind, crate::build_jobs::HostKind::Remote(_)));
+        if remote && argv[0] != "cargo" {
+            return Err(AgentToolError::invalid("only cargo commands run on a remote build host"));
+        }
+        // A remote host builds a commit, not this directory: default to the one checked out here.
+        let head_sha = match text("headSha") {
+            Some(sha) => Some(sha),
+            None if remote => Some(checked_out_commit(&cwd).ok_or_else(|| AgentToolError::invalid("headSha is required: cwd has no checked-out commit"))?),
+            None => None,
+        };
+        if head_sha.as_deref().is_some_and(|sha| !(7..=64).contains(&sha.len()) || !sha.bytes().all(|b| b.is_ascii_hexdigit())) {
+            return Err(AgentToolError::invalid("headSha must be a commit id of 7 to 64 hex digits"));
+        }
         let new = crate::build_jobs::NewJob {
             op_id, chat_id: context.grant.chat_id.clone(), run_id: Some(context.grant.run_id.clone()),
             space_id: context.grant.space_id.clone(), device_id: context.grant.device_id.clone(),
             host: text("host"), worktree_key: cwd_text.clone(), cwd: cwd_text, branch: chat.branch.clone(),
-            head_sha: text("headSha"), argv: argv.clone(), label: text("label"),
+            head_sha, argv: argv.clone(), label: text("label"),
             wake: arguments.get("wake").and_then(Value::as_bool).unwrap_or(true),
             integration: arguments.get("integration").and_then(Value::as_bool).unwrap_or(false),
             awaiting_approval: rule.is_none(), ..Default::default()
@@ -1754,7 +1824,14 @@ impl AgentToolsService {
         let job = queued.job;
         let mut approval = None;
         if job.state == crate::build_jobs::JobState::AwaitingApproval {
-            approval = self.raise_build_approval(context, &job)?;
+            approval = match self.raise_build_approval(context, &job) {
+                Ok(request) => request,
+                // Nobody could ever answer for it: do not leave it holding a queue place.
+                Err(error) => {
+                    let _ = jobs.deny(&job.id, "the approval request could not be raised");
+                    return Err(error);
+                }
+            };
         } else if let (Some(rule), Some(sessions), false) = (&rule, &sessions, queued.replay || queued.coalesced) {
             sessions.record_build_rule_use(&context.grant.chat_id, rule, &shell_words::join(&argv));
         }
@@ -1763,42 +1840,19 @@ impl AgentToolsService {
     }
 
     fn raise_build_approval(&self, context: &CallContext, job: &crate::build_jobs::Job) -> Result<Option<String>, AgentToolError> {
-        if context.current_item_id().is_none() {
-            return Ok(None);
+        // The title and body come from the job alone: nothing the agent words itself.
+        let command: String = shell_words::join(&job.argv).chars().take(80).collect();
+        let detail = build_approval_detail(job);
+        if detail.chars().count() > mast_proto::user_action_limits::MAX_REQUEST_INFO_CHARS {
+            return Err(AgentToolError::invalid("the command is too long to show in full on an approval card; shorten it or add a Space approval rule"));
         }
-        let command = shell_words::join(&job.argv);
         let reply = self.raise_user_action_request(context, &json!({
-            "request": format!("Approve build: {}", job.label.as_deref().unwrap_or(&command).chars().take(80).collect::<String>()),
-            "kind": "approve", "priority": "blocking", "dedupeKey": format!("build:{}", job.id),
-            "detail": format!("Build job {} on {} in {}:\n{command}", job.id, job.host, job.cwd),
-        }), false)?;
+            "request": format!("Approve build: {command}"),
+            "kind": "approve", "priority": "blocking",
+            "dedupeKey": format!("{BUILD_APPROVAL_KEY_PREFIX}{}", job.id),
+            "detail": detail,
+        }), ReservedCard::Build)?;
         Ok(reply.get("userActionRequestId").and_then(Value::as_str).map(str::to_owned))
-    }
-
-    /// Apply the user's answer to this chat's `awaiting_approval` jobs: approved queues, any other
-    /// resolution cancels.
-    fn sync_build_approvals(&self, context: &CallContext, jobs: &crate::build_jobs::BuildJobs) {
-        let filter = crate::build_jobs::ListFilter {
-            chat_id: Some(context.grant.chat_id.clone()), space_id: Some(context.grant.space_id.clone()),
-            active_only: true, limit: Some(100),
-        };
-        let Ok(active) = jobs.list(&filter) else { return };
-        let waiting: Vec<_> = active.into_iter().filter(|j| j.state == crate::build_jobs::JobState::AwaitingApproval).collect();
-        if waiting.is_empty() {
-            return;
-        }
-        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
-        for job in waiting {
-            let key = format!("build:{}", job.id);
-            let Some(request) = snapshot.user_action_requests.iter().find(|r| r.dedupe_key.as_deref() == Some(key.as_str()) && !r.is_open()) else { continue };
-            let Some(resolution) = &request.resolution else { continue };
-            let by_user = resolution.by.kind == mast_proto::WorkOutlineActorKind::User;
-            let _ = if by_user && resolution.outcome.as_deref() == Some("approved") {
-                jobs.approve(&job.id).map(|_| ())
-            } else {
-                jobs.deny(&job.id, "approval was declined").map(|_| ())
-            };
-        }
     }
 
     /// Apply one mutation as the token's Chat: `mutate_as` with the agent
@@ -2560,18 +2614,25 @@ impl AgentToolsService {
         context: &CallContext,
         arguments: &Value,
     ) -> Result<Value, AgentToolError> {
-        self.raise_user_action_request(context, arguments, false)
+        self.raise_user_action_request(context, arguments, ReservedCard::None)
     }
 
-    /// Creates or updates a request. `rule_proposal` is true only for
+    /// Creates or updates a request. `card` is `RuleProposal` only for
     /// `propose_approval_rule`, the one caller allowed to use the reserved
     /// proposal marker and title.
     fn raise_user_action_request(
         &self,
         context: &CallContext,
         arguments: &Value,
-        rule_proposal: bool,
+        card: ReservedCard,
     ) -> Result<Value, AgentToolError> {
+        let rule_proposal = card == ReservedCard::RuleProposal;
+        if card != ReservedCard::Build
+            && arguments.get("dedupeKey").or_else(|| arguments.get("dedupe_key")).and_then(Value::as_str)
+                .is_some_and(|key| key.trim_start().starts_with(BUILD_APPROVAL_KEY_PREFIX))
+        {
+            return Err(AgentToolError::invalid("dedupeKeys starting with \"build:\" are reserved for build_enqueue approvals"));
+        }
         if let Some(links) = arguments.get("links").and_then(Value::as_array) {
             for (index, link) in links.iter().enumerate() {
                 if serde_json::from_value::<mast_proto::RequestLink>(link.clone()).is_err() {
@@ -3339,7 +3400,7 @@ impl AgentToolsService {
         if let Some(key) = arguments.get("idempotencyKey").filter(|key| key.as_str().is_some_and(|key| !key.trim().is_empty())) {
             request["idempotencyKey"] = key.clone();
         }
-        self.raise_user_action_request(context, &request, true)
+        self.raise_user_action_request(context, &request, ReservedCard::RuleProposal)
     }
 
     fn propose_instruction(

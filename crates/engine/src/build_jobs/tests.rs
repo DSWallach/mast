@@ -1276,6 +1276,8 @@ struct RealHost {
     slot: String,
     sha: String,
     transport: Arc<ProcessTransport>,
+    ssh: PathBuf,
+    env: Vec<(String, String)>,
     jobs: BuildJobs,
 }
 
@@ -1347,17 +1349,18 @@ impl RealHost {
         )
         .unwrap();
         let lock = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+        let env: Vec<(String, String)> = vec![
+            ("HOME".into(), home.to_string_lossy().into_owned()),
+            ("PATH".into(), path),
+            ("REMOTE_CARGO_SLOT_PREFIX".into(), lock("slot-")),
+            ("REMOTE_CARGO_QUIET_LOCK".into(), lock("quiet.lock")),
+            ("REMOTE_CARGO_ADMIT_LOCK".into(), lock("admit.lock")),
+            ("REMOTE_CARGO_DEVICE_LOCK".into(), lock("device.lock")),
+        ];
         let transport = Arc::new(
             ProcessTransport::new(script)
                 .with_ssh(bin.join("ssh"))
-                .with_env(vec![
-                    ("HOME".into(), home.to_string_lossy().into_owned()),
-                    ("PATH".into(), path),
-                    ("REMOTE_CARGO_SLOT_PREFIX".into(), lock("slot-")),
-                    ("REMOTE_CARGO_QUIET_LOCK".into(), lock("quiet.lock")),
-                    ("REMOTE_CARGO_ADMIT_LOCK".into(), lock("admit.lock")),
-                    ("REMOTE_CARGO_DEVICE_LOCK".into(), lock("device.lock")),
-                ]),
+                .with_env(env.clone()),
         );
         let cfg = BuildJobsConfig::new(dir.path().join("store"), vec![profile]);
         std::fs::create_dir_all(&cfg.store_root).unwrap();
@@ -1372,6 +1375,8 @@ impl RealHost {
             slot,
             sha,
             transport,
+            ssh: bin.join("ssh"),
+            env,
             jobs,
         })
     }
@@ -1560,6 +1565,113 @@ fn a_start_whose_answer_was_lost_is_adopted_and_not_run_twice() {
     std::fs::remove_file(host.home.join("hold")).unwrap();
     wait_for_state(&host.jobs, &queued.id, JobState::Succeeded);
     assert_eq!(cargo_runs(&host), 1);
+}
+
+// Startup profile --------------------------------------------------------------------------------
+
+fn settings(slot: &str) -> serde_json::Value {
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    serde_json::json!({"enabled": true, "checkout": checkout, "host": {
+        "id": "desktop", "sshAlias": "fakehost", "repo": "Work/mast",
+        "checkoutPrefix": "Work/mast-wt-build-", "targetPrefix": "Work/mast-target-",
+        "maxRunners": 1, "slots": [{"name": slot, "incremental": false}], "startMode": "admit"}})
+}
+
+#[test]
+fn a_build_profile_is_accepted_only_when_every_field_is_present_and_safe() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let load = |value: &serde_json::Value| {
+        std::fs::write(dir.path().join(startup::SETTINGS_FILE), value.to_string()).unwrap();
+        startup::load(dir.path())
+    };
+    assert!(matches!(
+        startup::load(dir.path()),
+        Err(startup::Unavailable::NotConfigured(_))
+    ));
+    let profile = load(&settings("a")).unwrap();
+    assert!(profile.script.ends_with("scripts/remote-cargo.sh"));
+    assert_eq!(
+        (profile.host.id.as_str(), profile.host.max_runners),
+        ("desktop", 1)
+    );
+    assert!(matches!(
+        load(&json!({})),
+        Err(startup::Unavailable::Disabled(_))
+    ));
+    // Every host field is required: nothing is defaulted.
+    for field in [
+        "id", "sshAlias", "repo", "checkoutPrefix", "targetPrefix", "maxRunners", "slots", "startMode",
+    ] {
+        let mut value = settings("a");
+        value["host"].as_object_mut().unwrap().remove(field);
+        let error = load(&value).unwrap_err().to_string();
+        assert!(error.contains(field), "{field}: {error}");
+    }
+    for (pointer, bad, why) in [
+        ("/checkout", json!("relative/path"), "absolute path"),
+        ("/checkout", json!("/nonexistent"), "cannot read"),
+        ("/host/sshAlias", json!("-oProxyCommand=x"), "not an alias"),
+        ("/host/sshAlias", json!("user@host"), "not an alias"),
+        ("/host/repo", json!("/etc"), "host.repo"),
+        ("/host/repo", json!("Work/../.."), "host.repo"),
+        ("/host/checkoutPrefix", json!("a b"), "host.checkoutPrefix"),
+        ("/host/targetPrefix", json!("Other/target-"), "targetPrefix must be"),
+        ("/host/maxRunners", json!(2), "maxRunners"),
+        ("/host/maxRunners", json!(0), "maxRunners"),
+        ("/host/slots", json!([]), "at least one slot"),
+        (
+            "/host/slots",
+            json!([{"name": "a", "incremental": true}, {"name": "a", "incremental": false}]),
+            "unique",
+        ),
+        ("/host/startMode", json!("yolo"), "unknown variant"),
+        ("/host/startMode", json!({"deviceSerial": "a b"}), "plain serial"),
+    ] {
+        let mut value = settings("a");
+        *value.pointer_mut(pointer).unwrap() = bad;
+        let error = load(&value).unwrap_err().to_string();
+        assert!(error.contains(why), "{pointer}: {error}");
+    }
+    let mut extra = settings("a");
+    extra["host"]["sshHost"] = json!("x");
+    assert!(load(&extra).unwrap_err().to_string().contains("unknown field"));
+    // A checkout whose script predates the fenced start is refused.
+    let old = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(old.path().join("scripts")).unwrap();
+    std::fs::write(old.path().join("scripts/remote-cargo.sh"), "#!/bin/sh\n").unwrap();
+    let mut value = settings("a");
+    value["checkout"] = json!(old.path());
+    assert!(load(&value).unwrap_err().to_string().contains("too old"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_configured_queue_starts_from_its_file_and_builds_through_the_checkouts_script() {
+    let Some(host) = RealHost::new() else { return };
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(
+        data.path().join(startup::SETTINGS_FILE),
+        settings(&host.slot).to_string(),
+    )
+    .unwrap();
+    let (ssh, env) = (host.ssh.clone(), host.env.clone());
+    let jobs = startup::open_with(data.path(), Arc::new(RecordingWake::default()), |script| {
+        ProcessTransport::new(script).with_ssh(ssh).with_env(env)
+    })
+    .unwrap();
+    let task = jobs.serve(|_| {});
+    let queued = jobs.enqueue(host.job()).unwrap().job;
+    for _ in 0..300 {
+        if jobs.get(&queued.id).unwrap().state.is_terminal() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    task.abort();
+    let done = jobs.get(&queued.id).unwrap();
+    assert_eq!(done.state, JobState::Succeeded, "{done:?}");
+    assert_eq!(host.checkout_head(), host.sha);
+    host.forget(&jobs);
 }
 
 // Stop retry, cancel during the start window ----------------------------------------------------

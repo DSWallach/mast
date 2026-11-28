@@ -180,6 +180,18 @@ pub(crate) fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Build completion wakes go through the chat's event queue.
+struct BuildWake(doc_host::DocHost);
+
+impl build_jobs::WakeSink for BuildWake {
+    fn deliver(&self, chat_id: &str, text: &str, message_id: &str) -> Result<(), String> {
+        self.0
+            .queue_event_message(chat_id, text, message_id)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
 pub(crate) fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -255,6 +267,9 @@ pub struct EngineCore {
     /// stored-file watcher, render-check routing). Shared by every RPC
     /// surface so the UI's render registration reaches agent tool calls.
     pub artifacts: artifacts::ArtifactsService,
+    /// The engine's one build queue, or why it has none; every RPC surface shares it.
+    build_queue: Result<build_jobs::BuildJobs, build_jobs::startup::Unavailable>,
+    build_queue_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub orchestrator_wakes: orchestrator_wakes::OrchestratorWakes,
     /// Shared launch and handoff serialization for every engine RPC surface.
     pub(crate) work_item_launch: work_outline_launch::WorkItemLaunchService,
@@ -813,6 +828,19 @@ impl EngineCore {
             Some(data_dir.join("review-dispatches.json")),
         );
         let work_queue_cancel = tokio_util::sync::CancellationToken::new();
+        let build_queue = build_jobs::startup::open(data_dir, Arc::new(BuildWake(doc_host.clone())));
+        match &build_queue {
+            Ok(_) => {}
+            Err(reason @ build_jobs::startup::Unavailable::Invalid(_)) => {
+                tracing::warn!(%reason, "build queue is unavailable")
+            }
+            Err(reason) => tracing::debug!(%reason, "build queue is unavailable"),
+        }
+        // Recovery and scheduling reach the build host, so they run beside startup, never in it.
+        let build_queue_task = build_queue.as_ref().ok().filter(|_| !soak).map(|jobs| {
+            let workspace = workspace.clone();
+            jobs.serve(move |jobs| agent_tools::apply_build_approvals(jobs, &workspace))
+        });
         let peer_outbound_cancel = tokio_util::sync::CancellationToken::new();
         if !soak {
             // Worker reports queued for chats here by devices this one paired with.
@@ -920,6 +948,8 @@ impl EngineCore {
             updater_wake: std::sync::Mutex::new(None),
             pr_ticket_sweep: std::sync::Mutex::new(pr_ticket_sweep),
             token_usage_retention:std::sync::Mutex::new(token_usage_retention),
+            build_queue,
+            build_queue_task: std::sync::Mutex::new(build_queue_task),
             _instance_lock: lock,
         })
     }
@@ -1042,6 +1072,11 @@ impl EngineCore {
         mast_rpc::HostRelay::spawn(config, outward_transport(self.rpc_service(), "relay"), on_nudge)
     }
 
+    /// The build queue this engine runs, when `build-queue.json` configures one.
+    pub fn build_jobs(&self) -> Result<&build_jobs::BuildJobs, &build_jobs::startup::Unavailable> {
+        self.build_queue.as_ref()
+    }
+
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
         let mut rpc = EngineRpc::new(
             self.sessions.clone(),
@@ -1073,6 +1108,11 @@ impl EngineCore {
         .with_review_dispatch(self.review_dispatch.clone())
         .with_orchestrator_wakes(self.orchestrator_wakes.clone());
         rpc = rpc.with_scheduled_tasks(self.scheduled_tasks.clone());
+        rpc = match &self.build_queue {
+            Ok(jobs) => rpc.with_build_jobs(jobs.clone()),
+            Err(reason) => rpc.without_build_jobs(reason),
+        };
+        // The offscreen UI driver brings its own queue (test builds only; otherwise `None`).
         if let Some(jobs) = driver_hooks::build_jobs_for(&self.device_id) {
             rpc = rpc.with_build_jobs(jobs);
         }
@@ -1151,6 +1191,11 @@ impl EngineCore {
         // recovered work while the engine is being torn down.
         self.doc_host.pause_all_queues();
         self.orchestrator_wakes.shutdown();
+        let build_queue_task = self.build_queue_task.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        if let Some(task) = build_queue_task {
+            task.abort();
+            let _ = task.await;
+        }
         self.work_queue_cancel.cancel();
         self.peer_outbound_cancel.cancel();
         self.sessions.shutdown().await;
