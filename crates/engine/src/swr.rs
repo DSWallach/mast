@@ -29,7 +29,7 @@ pub struct Entry<V> {
 type Flight<V, E> = Shared<BoxFuture<'static, Result<Entry<V>, E>>>;
 
 struct State<V, E> {
-    entries: HashMap<String, Entry<V>>,
+    entries: HashMap<String, Arc<Entry<V>>>,
     inflight: HashMap<String, (u64, Flight<V, E>)>,
     next_id: u64,
     path: Option<PathBuf>,
@@ -84,14 +84,14 @@ where
             .unwrap_or_default();
         let mut state = self.lock();
         for (key, entry) in loaded {
-            state.entries.entry(key).or_insert(entry);
+            state.entries.entry(key).or_insert_with(|| Arc::new(entry));
         }
         state.path = Some(path);
     }
 
     /// The stored entry, however old.
     pub fn peek(&self, key: &str) -> Option<Entry<V>> {
-        self.lock().entries.get(key).cloned()
+        self.lock().entries.get(key).map(|entry| Entry::clone(entry))
     }
 
     fn is_fresh(&self, entry: &Entry<V>) -> bool {
@@ -120,7 +120,7 @@ where
         let flight = {
             let mut state = self.lock();
             if !force
-                && let Some(entry) = state.entries.get(key)
+                && let Some(entry) = state.entries.get(key).map(|entry| Entry::clone(entry))
                     && self.is_fresh(entry) {
                         return Ok(entry.clone());
                     }
@@ -160,7 +160,7 @@ where
         if !current {
             return Ok(entry);
         }
-        state.entries.insert(key.to_owned(), entry.clone());
+        state.entries.insert(key.to_owned(), Arc::new(entry.clone()));
         let snapshot = persist_snapshot(&state);
         drop(state);
         write_snapshot(snapshot);
@@ -168,24 +168,49 @@ where
     }
 }
 
-type Snapshot = Option<(PathBuf, Result<Vec<u8>, String>, Arc<AtomicU64>, u64, Arc<Mutex<()>>)>;
+/// What a write needs, taken under the lock: the entries by `Arc` (a pointer
+/// copy each, not a deep clone) and the write ordering. The JSON is built
+/// afterwards, off the lock, so a refresh of one key never holds readers up
+/// for the length of the whole cache's serialization.
+type Snapshot<V> = Option<(
+    PathBuf,
+    Vec<(String, Arc<Entry<V>>)>,
+    Arc<AtomicU64>,
+    u64,
+    Arc<Mutex<()>>,
+)>;
 
-fn persist_snapshot<V: Serialize, E>(state: &State<V, E>) -> Snapshot {
+fn persist_snapshot<V, E>(state: &State<V, E>) -> Snapshot<V> {
     let path = state.path.clone()?;
-    let bytes = serde_json::to_vec(&state.entries).map_err(|e| e.to_string());
+    let entries = state
+        .entries
+        .iter()
+        .map(|(key, entry)| (key.clone(), entry.clone()))
+        .collect();
     let revision = state.write_revision.fetch_add(1, Ordering::SeqCst) + 1;
-    Some((path, bytes, state.write_revision.clone(), revision, state.write_gate.clone()))
+    Some((path, entries, state.write_revision.clone(), revision, state.write_gate.clone()))
+}
+
+fn serialize_entries<V: Serialize>(entries: &[(String, Arc<Entry<V>>)]) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let mut serializer = serde_json::Serializer::new(&mut bytes);
+    serde::Serializer::collect_map(
+        &mut serializer,
+        entries.iter().map(|(key, entry)| (key, &**entry)),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(bytes)
 }
 
 /// Write off the async worker when a runtime is present; atomic via rename.
-fn write_snapshot(snapshot: Snapshot) {
-    let Some((path, bytes, latest, revision, gate)) = snapshot else {
+fn write_snapshot<V: Serialize + Send + Sync + 'static>(snapshot: Snapshot<V>) {
+    let Some((path, entries, latest, revision, gate)) = snapshot else {
         return;
     };
     let write = move || {
         let _guard = gate.lock().unwrap_or_else(|e| e.into_inner());
         if latest.load(Ordering::SeqCst) != revision { return; }
-        let Ok(bytes) = bytes else { return };
+        let Ok(bytes) = serialize_entries(&entries) else { return };
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
