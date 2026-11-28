@@ -209,8 +209,12 @@ fn is_refresh_token(name: &str) -> bool {
 pub fn worker_env_allows(name: &str, id: HarnessId, managed: bool) -> bool {
     // The scoped token is injected by Mast on the command; an inherited one
     // belongs to another scope.
+    // Launch instructions are not the worker's business: the scoped token is
+    // injected by Mast (an inherited one belongs to another scope), and the
+    // flag and the passthrough list configure this very scrub.
     if name == mast_proto::agent_tools::TOKEN_ENV
         || name == WORKER_SCRUB_ENV
+        || name == WORKER_ENV_PASSTHROUGH
         || is_refresh_token(name)
     {
         return false;
@@ -497,6 +501,18 @@ mod tests {
             ),
             ("other home", "GEMINI_HOME", HarnessId::Codex, true),
             // class: an inherited agent token belongs to another scope
+            (
+                "worker flag",
+                "MAST_AGENT_SCRUB",
+                HarnessId::ClaudeCode,
+                false,
+            ),
+            (
+                "scrub control",
+                "MAST_WORKER_ENV_PASSTHROUGH",
+                HarnessId::Codex,
+                true,
+            ),
             (
                 "agent token",
                 "MAST_AGENT_TOKEN",

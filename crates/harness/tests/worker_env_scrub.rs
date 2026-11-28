@@ -258,11 +258,17 @@ async fn every_harness_spawn_path_scrubs_a_flagged_worker_and_only_that() {
             "synthetic-gh-token",
             "synthetic-refresh-token",
             "zat_inherited_from_another_scope",
-            "MAST_AGENT_SCRUB",
         ] {
             assert!(
                 !dump.contains(still_gone),
                 "{harness}: {still_gone} leaked through the passthrough"
+            );
+        }
+        // By name, not substring: the passthrough variable's own value lists them.
+        for name in ["MAST_AGENT_SCRUB", "MAST_WORKER_ENV_PASSTHROUGH"] {
+            assert!(
+                !dump.lines().any(|l| l.starts_with(&format!("{name}="))),
+                "{harness}: {name} reached the worker child\n{dump}"
             );
         }
     }
