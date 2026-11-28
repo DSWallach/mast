@@ -151,22 +151,29 @@ where
     }
 
     fn finish(&self, key: &str, id: u64, result: Result<V, E>) -> Result<Entry<V>, E> {
+        // Everything that allocates or frees in bulk happens off the lock: the
+        // stored copy is built before it is taken and the replaced entry is
+        // dropped after it is released, so readers only wait for map updates.
+        let prepared = result.map(|value| {
+            let entry = Entry {
+                fetched_at: Utc::now(),
+                value,
+            };
+            (Arc::new(entry.clone()), entry)
+        });
         let mut state = self.lock();
         let current = state.inflight.get(key).is_some_and(|(i, _)| *i == id);
         if current {
             state.inflight.remove(key);
         }
-        let value = result?;
-        let entry = Entry {
-            fetched_at: Utc::now(),
-            value,
-        };
+        let (stored, entry) = prepared?;
         if !current {
             return Ok(entry);
         }
-        state.entries.insert(key.to_owned(), Arc::new(entry.clone()));
+        let replaced = state.entries.insert(key.to_owned(), stored);
         let snapshot = persist_snapshot(&state);
         drop(state);
+        drop(replaced);
         write_snapshot(snapshot);
         Ok(entry)
     }
