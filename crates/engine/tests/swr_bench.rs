@@ -88,3 +88,46 @@ fn bench_swr_lock_hold() {
     }
 }
 
+
+/// Control for `bench_swr_lock_hold`: the reader polls an idle store (nobody
+/// else touches its lock) while another thread only serializes a `keys`-key
+/// map to JSON, as the cache writer does. A reader stall here cannot come from
+/// the store lock, so it is host cost (allocator, page faults, scheduling).
+#[test]
+#[ignore = "benchmark: run with --ignored --nocapture"]
+fn bench_swr_reader_stall_control() {
+    for keys in [8usize, 16, 32] {
+        let entries: std::collections::HashMap<String, Entry<Vec<LinearIssueSummary>>> = (0..keys)
+            .map(|k| {
+                (
+                    format!("key{k}"),
+                    Entry {
+                        fetched_at: chrono::Utc::now(),
+                        value: (0..300).map(|i| issue(k * 1000 + i)).collect(),
+                    },
+                )
+            })
+            .collect();
+        let idle: SwrStore<Vec<LinearIssueSummary>, String> =
+            SwrStore::new(std::time::Duration::from_secs(60));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let (idle, stop) = (idle.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut worst = 0f64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let t = Instant::now();
+                    std::hint::black_box(idle.peek("absent").is_some());
+                    worst = worst.max(t.elapsed().as_secs_f64() * 1000.0);
+                }
+                worst
+            })
+        };
+        for _ in 0..20 {
+            std::hint::black_box(serde_json::to_vec(&entries).unwrap());
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let worst = reader.join().unwrap();
+        eprintln!("SAMPLE swr-control | {keys} | idle-store reader max stall | ms={worst:.3}");
+    }
+}
