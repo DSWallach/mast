@@ -10,16 +10,29 @@
 //! Records live in one file beside the engine's data. That is only safe with
 //! one authoritative engine, so dispatch stays disabled (recorded as blocked)
 //! once the workspace syncs through a server.
+//!
+//! # Cross-family reviewers
+//!
+//! A reviewer should run on a different model family than the implementer
+//! (plan v3 §7.1). [`select_reviewer`] picks one among the signed-in harnesses
+//! ([`signed_in_reviewers`]) and, when no other family is signed in, falls back
+//! to the implementer's family and records why. The choice is a library result:
+//! [`ReviewerChoice::config`] is the launch config for it, and the merge queue
+//! keeps it on the land request. [`ReviewDispatcher::dispatch`] does not apply
+//! it yet.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use mast_proto::{
-    CreateChatForWorkItemParams, DispatchKind, DispatchRecord, DispatchState, ReportCompletion,
-    StandingRoleKind, WorkItemPrompt, dispatch_operation_id,
+    ChatConfig, CreateChatForWorkItemParams, DispatchKind, DispatchRecord, DispatchState,
+    HarnessId, ReportCompletion, SandboxLevel, StandingRoleKind, WorkItemPrompt,
+    dispatch_operation_id, resolve_model,
 };
+use serde::{Deserialize, Serialize};
 
+use crate::agent_accounts::{AgentAccounts, LocalSignInStatus};
 use crate::work_outline_launch::WorkItemLaunchService;
 use crate::workspace_host::WorkspaceHost;
 
@@ -362,6 +375,191 @@ impl ReviewDispatcher {
     }
 }
 
+/// Who makes a model. Two models of one family share blind spots, whatever
+/// harness runs them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelFamily {
+    Claude,
+    /// GPT and Codex models.
+    Gpt,
+    Gemini,
+    Grok,
+    /// The harness runs several vendors' models and the model id does not say
+    /// which, so it cannot be shown to differ from anything.
+    Unknown,
+}
+
+impl ModelFamily {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::Gpt => "GPT/Codex",
+            Self::Gemini => "Gemini",
+            Self::Grok => "Grok",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// The family a model id names, if it names one. Handles provider-prefixed ids
+/// such as `anthropic/claude-...`.
+fn named_family(model: &str) -> Option<ModelFamily> {
+    let model = model.to_ascii_lowercase();
+    let has = |names: &[&str]| names.iter().any(|name| model.contains(name));
+    let token = |names: &[&str]| {
+        model
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|part| names.contains(&part))
+    };
+    if has(&["claude"]) || token(&["opus", "sonnet", "haiku", "fable"]) {
+        Some(ModelFamily::Claude)
+    } else if has(&["gpt", "codex"]) || token(&["o1", "o3", "o4"]) {
+        Some(ModelFamily::Gpt)
+    } else if has(&["gemini"]) {
+        Some(ModelFamily::Gemini)
+    } else if has(&["grok"]) {
+        Some(ModelFamily::Grok)
+    } else {
+        None
+    }
+}
+
+/// The model family of a run. The model id wins over the harness, because a
+/// harness such as Cursor or opencode runs other vendors' models; without a
+/// telling id, only a single-vendor harness settles it.
+pub fn model_family(harness: HarnessId, model: Option<&str>) -> ModelFamily {
+    let model = model.map(str::trim).filter(|m| !m.is_empty());
+    if let Some(family) = model.and_then(named_family) {
+        return family;
+    }
+    match harness {
+        HarnessId::ClaudeCode => ModelFamily::Claude,
+        HarnessId::Codex => ModelFamily::Gpt,
+        // Antigravity also offers other vendors' models, so an id that names
+        // none of them is not assumed to be Gemini.
+        HarnessId::Antigravity if model.is_none() => ModelFamily::Gemini,
+        HarnessId::Grok => ModelFamily::Grok,
+        _ => ModelFamily::Unknown,
+    }
+}
+
+/// A harness and model a reviewer could run on, already known to be signed in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewerCandidate {
+    pub harness: HarnessId,
+    /// `None` uses the harness's own default.
+    pub model: Option<String>,
+}
+
+/// The reviewer picked for one implementer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewerChoice {
+    pub harness: HarnessId,
+    pub model: Option<String>,
+    pub family: ModelFamily,
+    pub implementer_family: ModelFamily,
+    /// Why the reviewer is not known to be from another family. `None` exactly
+    /// when it is.
+    pub fallback_reason: Option<String>,
+}
+
+impl ReviewerChoice {
+    pub fn is_cross_family(&self) -> bool {
+        self.fallback_reason.is_none()
+    }
+
+    /// The launch config of this reviewer: read-only, asking for approvals.
+    pub fn config(&self) -> ChatConfig {
+        ChatConfig {
+            harness: self.harness,
+            model: self.model.clone().or_else(|| resolve_model(self.harness, None)),
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: SandboxLevel::ReadOnly,
+            auto_approve: false,
+            approval_rules: false,
+        }
+    }
+}
+
+/// Pick a reviewer for work done on `implementer_harness` / `implementer_model`
+/// from `candidates`, in their order of preference. A candidate of a known,
+/// different family wins; otherwise the first candidate of the implementer's
+/// family (else the first at all) is taken and the reason recorded. `None` when
+/// there is no candidate.
+pub fn select_reviewer(
+    implementer_harness: HarnessId,
+    implementer_model: Option<&str>,
+    candidates: &[ReviewerCandidate],
+) -> Option<ReviewerChoice> {
+    let implementer = model_family(implementer_harness, implementer_model);
+    let family = |c: &ReviewerCandidate| model_family(c.harness, c.model.as_deref());
+    let choose = |c: &ReviewerCandidate, fallback_reason: Option<String>| ReviewerChoice {
+        harness: c.harness,
+        model: c.model.clone(),
+        family: family(c),
+        implementer_family: implementer,
+        fallback_reason,
+    };
+    if implementer == ModelFamily::Unknown {
+        let pick = candidates
+            .iter()
+            .find(|c| family(c) != ModelFamily::Unknown)
+            .or_else(|| candidates.first())?;
+        return Some(choose(
+            pick,
+            Some(
+                "The implementer's model family is unknown, so the reviewer cannot be shown to \
+                 be from another one."
+                    .into(),
+            ),
+        ));
+    }
+    if let Some(other) = candidates
+        .iter()
+        .find(|c| family(c) != ModelFamily::Unknown && family(c) != implementer)
+    {
+        return Some(choose(other, None));
+    }
+    if let Some(same) = candidates.iter().find(|c| family(c) == implementer) {
+        return Some(choose(
+            same,
+            Some(format!(
+                "No other model family is signed in, so the reviewer shares the implementer's \
+                 {} family.",
+                implementer.label()
+            )),
+        ));
+    }
+    candidates.first().map(|c| {
+        choose(
+            c,
+            Some(format!(
+                "No signed-in reviewer is known to be outside the implementer's {} family.",
+                implementer.label()
+            )),
+        )
+    })
+}
+
+/// The reviewers this device is signed in for, most preferred first. Only
+/// harnesses whose local sign-in can be checked are offered.
+pub async fn signed_in_reviewers(accounts: &AgentAccounts) -> Vec<ReviewerCandidate> {
+    let mut candidates = Vec::new();
+    for harness in [HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Antigravity] {
+        if accounts.local_sign_in_status(harness).await == LocalSignInStatus::SignedIn {
+            candidates.push(ReviewerCandidate {
+                harness,
+                model: resolve_model(harness, None),
+            });
+        }
+    }
+    candidates
+}
+
 fn review_launch(
     item: &str,
     completion: &ReportCompletion,
@@ -459,6 +657,73 @@ mod tests {
         assert_eq!(std::fs::read(&aside).unwrap(), b"{ not json", "the bad file is kept");
         assert_eq!(std::fs::read(&path).unwrap(), b"{}");
         file.save(&BTreeMap::new()).unwrap();
+    }
+
+    fn candidate(harness: HarnessId, model: Option<&str>) -> ReviewerCandidate {
+        ReviewerCandidate { harness, model: model.map(str::to_owned) }
+    }
+
+    #[test]
+    fn the_model_id_decides_the_family_before_the_harness() {
+        use HarnessId as H;
+        use ModelFamily as F;
+        for (harness, model, family) in [
+            (H::ClaudeCode, None, F::Claude),
+            (H::Codex, Some("gpt-6-codex"), F::Gpt),
+            (H::Cursor, Some("claude-sonnet-5-5"), F::Claude),
+            (H::Opencode, Some("openai/o3"), F::Gpt),
+            (H::Antigravity, None, F::Gemini),
+            (H::Antigravity, Some("claude-opus-5-5"), F::Claude),
+            (H::Antigravity, Some("mystery-1"), F::Unknown),
+            (H::Cursor, Some("composer-2"), F::Unknown),
+            (H::Cursor, None, F::Unknown),
+        ] {
+            assert_eq!(model_family(harness, model), family, "{harness:?} {model:?}");
+        }
+    }
+
+    #[test]
+    fn a_reviewer_from_another_family_is_preferred() {
+        let candidates = [
+            candidate(HarnessId::ClaudeCode, Some("claude-opus-5-5")),
+            candidate(HarnessId::Cursor, Some("claude-sonnet-5-5")),
+            candidate(HarnessId::Cursor, Some("composer-2")),
+            candidate(HarnessId::Codex, None),
+        ];
+        let choice =
+            select_reviewer(HarnessId::ClaudeCode, Some("claude-sonnet-5-5"), &candidates).unwrap();
+        assert_eq!((choice.harness, choice.family), (HarnessId::Codex, ModelFamily::Gpt));
+        assert!(choice.is_cross_family());
+        let back = select_reviewer(HarnessId::Codex, None, &candidates).unwrap();
+        assert_eq!(back.family, ModelFamily::Claude);
+        assert!(back.is_cross_family());
+        let config = back.config();
+        assert_eq!(config.sandbox, SandboxLevel::ReadOnly);
+        assert!(!config.auto_approve);
+    }
+
+    #[test]
+    fn a_same_family_fallback_records_why() {
+        let only_claude = [
+            candidate(HarnessId::Cursor, Some("composer-2")),
+            candidate(HarnessId::ClaudeCode, None),
+        ];
+        let choice = select_reviewer(HarnessId::ClaudeCode, None, &only_claude).unwrap();
+        assert_eq!(choice.harness, HarnessId::ClaudeCode);
+        assert!(!choice.is_cross_family());
+        let reason = choice.fallback_reason.clone().unwrap();
+        assert!(reason.contains("No other model family is signed in"), "{reason}");
+        assert!(reason.contains("Claude"), "{reason}");
+        assert_eq!(choice.config().model.as_deref(), Some(mast_proto::DEFAULT_CLAUDE_MODEL));
+
+        let unknown = select_reviewer(HarnessId::Cursor, None, &only_claude).unwrap();
+        assert_eq!(unknown.family, ModelFamily::Claude);
+        assert!(unknown.fallback_reason.unwrap().contains("unknown"));
+
+        let unprovable =
+            select_reviewer(HarnessId::ClaudeCode, None, &only_claude[..1]).unwrap();
+        assert!(!unprovable.is_cross_family());
+        assert!(select_reviewer(HarnessId::ClaudeCode, None, &[]).is_none());
     }
 
     #[test]
