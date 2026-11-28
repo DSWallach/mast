@@ -2182,7 +2182,13 @@ async fn launching_for_an_item_with_a_stopped_worker_continues_it_as_a_hand_off(
     let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-cont", SPACE, &rig.core.device_id);
     let token = lease.token().to_owned();
     let key = "cont-next";
-    let reply = tool(&rig, &token, "chat_launch_child_for_item", launch_args(key, &task, "workspace-write")).await.unwrap();
+    let unqualified = |key: &str| {
+        let mut args = launch_args(key, &task, "workspace-write");
+        args["harnessOmitted"] = json!(true);
+        args["modelOmitted"] = json!(true);
+        args
+    };
+    let reply = tool(&rig, &token, "chat_launch_child_for_item", unqualified(key)).await.unwrap();
     let workspace = &rig.core.workspace;
     let successor = reply["chatId"].as_str().unwrap().to_owned();
     // Same assignment, same coordinator, predecessor archived once the successor started.
@@ -2191,8 +2197,12 @@ async fn launching_for_an_item_with_a_stopped_worker_continues_it_as_a_hand_off(
     assert!(workspace.chat("cont-old").unwrap().unwrap().archived);
     assert_eq!(workspace.handed_off_to("cont-old").as_deref(), Some(successor.as_str()));
     // A retry with the same key returns the same successor, not a third chat.
-    let retry = tool(&rig, &token, "chat_launch_child_for_item", launch_args(key, &task, "workspace-write")).await.unwrap();
+    let retry = tool(&rig, &token, "chat_launch_child_for_item", unqualified(key)).await.unwrap();
     assert_eq!(retry["chatId"], successor);
+    // A caller that names a model chose a new worker: nothing is continued.
+    let named = tool(&rig, &token, "chat_launch_child_for_item", launch_args("cont-named", &task, "workspace-write")).await.unwrap();
+    assert_ne!(named["chatId"], json!(successor));
+    assert!(!workspace.chat(&successor).unwrap().unwrap().archived);
     // An explicit separate assignment starts a parallel chat and keeps the worker.
     let mut separate = launch_args("cont-review", &task, "workspace-write");
     separate["separate"] = json!(true);
