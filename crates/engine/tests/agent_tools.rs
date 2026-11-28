@@ -11695,6 +11695,9 @@ async fn a_configured_engine_runs_one_queue_for_every_surface_and_applies_a_decl
     let listed = second.call(mast_proto::agent_tools::TOOL_CALL_METHOD,
         json!({ "token": owner.token(), "tool": "build_list", "arguments": {} })).await.unwrap();
     assert_eq!(listed["jobs"][0]["jobId"], job_id.as_str());
+    // The Builds panel's RPCs are fed by the same queue.
+    second.call(methods::BUILD_JOB_LOG, json!({ "jobId": job_id })).await
+        .expect("the panel reads a job the agent tools queued");
     let request = queued["approvalRequestId"].as_str().unwrap().to_owned();
     let card = rig.core.workspace.work_outline_inputs(SPACE);
     let card = mast_doc::materialize_work_outline(SPACE, &card).user_action_requests.into_iter().find(|r| r.id == request).unwrap();
