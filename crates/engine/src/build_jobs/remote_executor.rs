@@ -4,82 +4,48 @@
 //! # Lazy slot checkouts (P10)
 //!
 //! Nothing is provisioned when a job is enqueued or while it waits. A slot's checkout
-//! (`~/Work/mast-wt-build-<slot>`, a detached `git worktree` of `~/Work/mast`) is created, or
-//! moved to the job's `head_sha`, only in [`RemoteExecutor::start`], that is, when the scheduler
-//! dequeues the job for execution. The same step writes the slot environment file
-//! `~/Work/mast-slot-<slot>.env` (`CARGO_TARGET_DIR=~/Work/mast-target-<slot>` and
-//! `CARGO_INCREMENTAL`, `1` on the integration slot `a` only) unless an unmanaged file is already
-//! there. The commit must already exist on the host (push the branch first); a missing commit
-//! fails the job with that reason instead of building something else. The job builds the commit
-//! in the checkout root, not the (possibly dirty) worktree it was enqueued from.
+//! (`<checkout prefix><slot>`, a detached `git worktree` of the host's repository) is created, or
+//! moved to the job's `head_sha`, only by the `start --checkout` call [`RemoteExecutor::start`]
+//! makes when the scheduler dequeues the job. The script also writes the slot environment file
+//! `~/Work/mast-slot-<slot>.env` (`CARGO_TARGET_DIR=<target prefix><slot>` and
+//! `CARGO_INCREMENTAL`) unless an unmanaged file is already there. The commit must already exist
+//! on the host (push the branch first); a missing commit fails the job with that reason instead
+//! of building something else. The job builds the commit in the checkout root, not the (possibly
+//! dirty) worktree it was enqueued from.
 //!
-//! The job itself is `scripts/remote-cargo.sh start ... -- cargo ...` under the name
-//! `mastbj-<job id>`; `status`, `wait` and `stop` follow it. The start option comes from
-//! [`StartMode`]: the three-slot desktop uses `--admit` (a job that carries a quiet-window lease
-//! uses `--quiet-window`), cutover mode uses `--device-serial <serial>`, and `Plain` passes no
-//! option. The script's own refusals are mapped: admission limits, a held lock, a busy slot or
-//! an unreachable host put the job back in the queue: a refusal of the *slot* (`slot X busy`,
-//! `slot X lock timeout`, the checkout step's exit 7) is `StartError::Busy` and the job goes to the
-//! next free slot, a refusal of the *host* (admission limits, held locks, ssh down) is
-//! `StartError::HostBusy` and pauses the host's starts for a backoff; a slot, checkout or
-//! target-directory policy refusal fails the job.
+//! # Ownership and fencing (enforced by the host)
+//!
+//! No engine owns a host. The script holds the slot's `flock` from its "is the slot idle" check,
+//! across the checkout, until the new job's name is in the slot's job file; from then on the slot
+//! is busy for as long as that job's runner is alive (PID plus start time). So two engines, two
+//! devices or a hand-run `remote-cargo.sh start` sharing a slot can never move a checkout under
+//! each other's job: the later one is refused with `slot X busy` and its job goes back to the
+//! queue.
+//!
+//! # Lost connections
+//!
+//! Every start attempt has its own job name (`mastbj-<job id>-<attempt>`). When the answer to a
+//! start is lost, `remote-cargo.sh fence <name>` settles it atomically on the host through the
+//! job's claim file: `fenced` means the job has not run and now never will, even if the start
+//! command is still on its way, so it is safe to queue the job again; `started` or `exit N`
+//! means the host owns a job under that name, which is adopted. While the host cannot be
+//! reached the job stays `running` without a pid, and every later probe fences first.
+//!
+//! The job itself is `scripts/remote-cargo.sh start ... -- cargo ...`; `status`, `wait` and
+//! `stop` follow it. The start option comes from [`StartMode`]: the three-slot desktop uses
+//! `--admit` (a job that carries a quiet-window lease uses `--quiet-window`), cutover mode uses
+//! `--device-serial <serial>`, and `Plain` passes no admission option. The script's own refusals
+//! are mapped: admission limits, a held lock, a busy slot or an unreachable host put the job back
+//! in the queue: a refusal of the *slot* (`slot X busy`, `slot X lock timeout`) is
+//! `StartError::Busy` and the job goes to the next free slot, a refusal of the *host* (admission
+//! limits, held locks, ssh down) is `StartError::HostBusy` and pauses the host's starts for a
+//! backoff; a slot, checkout or target-directory policy refusal fails the job.
 
 use super::{
     HostKind, HostProfile, Job, StartMode,
     runner::{Executor, ExitRecord, Probe, StartCtx, StartError, Started, StopError},
 };
 use std::{collections::HashMap, io::Write, path::PathBuf, process::Stdio, sync::Arc};
-
-/// Creates or moves the slot checkout, strictly while the slot is idle. It takes the script's own
-/// slot lock (`<prefix><slot>.lock`) and refuses (exit 7) when the slot's job file names a job
-/// that is still alive, so a checkout is never moved under a running cargo. Its own job name
-/// (a retry after a dropped start) is the one exception: nothing is touched and it exits 0 with
-/// `already running`. `alive`/`starttime` are the script's own liveness check (PID plus start
-/// time), copied so this runs outside the script.
-pub(super) const ENSURE_CHECKOUT: &str = r#"set -eu
-repo=$HOME/$1 dir=$HOME/$2 sha=$3 slot=$4 incr=$5 target=$6 name=$7
-pfx=${REMOTE_CARGO_SLOT_PREFIX:-/tmp/remote-cargo-slot-}
-starttime() {
-    if [ -r "/proc/$1/stat" ]; then
-        s=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
-        rp=")"
-        ( set -- ${s##*"$rp" }; eval "echo \${20}" )
-    else
-        ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '
-    fi
-}
-alive() {
-    [ -n "$1" ] || return 1
-    p=$(cat "/tmp/$1.pid" 2>/dev/null) || return 1
-    { [ -n "$p" ] && kill -0 "$p" 2>/dev/null; } || return 1
-    [ -s "/tmp/$1.start" ] || return 0
-    [ "$(starttime "$p")" = "$(cat "/tmp/$1.start")" ]
-}
-exec 9> "${pfx}$slot.lock"
-if ! flock -w 10 9; then echo "slot $slot lock timeout"; exit 7; fi
-old=$(cat "${pfx}$slot.job" 2>/dev/null || true)
-if [ -n "$old" ] && [ ! -e "/tmp/$old.exit" ] && alive "$old"; then
-    if [ "$old" = "$name" ]; then echo "already running $name"; exit 0; fi
-    echo "slot $slot busy: $old"; exit 7
-fi
-[ -e "$repo/.git" ] || { echo "no repository at $repo on this host"; exit 3; }
-git -C "$repo" cat-file -e "$sha^{commit}" 2>/dev/null || { echo "commit $sha is not on this host; push the branch to it first"; exit 4; }
-if [ ! -e "$dir/.git" ]; then
-    git -C "$repo" worktree add --detach "$dir" "$sha" >/dev/null 2>&1 || { echo "could not create the slot checkout $dir"; exit 5; }
-fi
-if [ "$(git -C "$dir" rev-parse HEAD)" != "$sha" ]; then
-    git -C "$dir" checkout --detach --force "$sha" >/dev/null 2>&1 || { echo "could not check out $sha in $dir"; exit 6; }
-fi
-mkdir -p "$HOME/Work"
-envf=$HOME/Work/mast-slot-$slot.env
-marker='# managed by mast build_jobs'
-if [ ! -e "$envf" ] || head -n 1 "$envf" | grep -qF "$marker"; then
-    { echo "$marker"; echo "CARGO_TARGET_DIR=\$HOME/$target"; echo "CARGO_INCREMENTAL=$incr"; echo "export CARGO_TARGET_DIR CARGO_INCREMENTAL"; } > "$envf.tmp.$$" && mv "$envf.tmp.$$" "$envf"
-else
-    echo "note: leaving the unmanaged $envf in place"
-fi
-echo "ready $dir at $sha"
-"#;
 
 /// Check that `alias` is an ssh *alias* (`desktop`), not `user@host`, an address or an option.
 /// Raw addresses reintroduce host-key prompts that stall a job, and a leading `-` would be read
@@ -138,7 +104,7 @@ impl ProcessTransport {
         }
     }
 
-    /// The ssh program for the engine's own ssh calls (the checkout step, `df`, log fetch); the
+    /// The ssh program for the engine's own ssh calls (`df`, pid and log fetch); the
     /// script runs whatever `ssh` is on its `PATH`. Tests substitute a fake.
     pub fn with_ssh(mut self, ssh: PathBuf) -> Self {
         self.ssh = ssh;
@@ -241,6 +207,13 @@ impl RemoteTransport for ProcessTransport {
     }
 }
 
+/// The host's answer to `fence`.
+enum Fence {
+    NeverRuns,
+    Started,
+    Unknown(String),
+}
+
 pub struct RemoteExecutor {
     transport: Arc<dyn RemoteTransport>,
     /// Host profile id -> ssh alias for the profiles this executor serves.
@@ -298,45 +271,6 @@ impl Executor for RemoteExecutor {
         };
         let checkout = format!("{}{}", remote.checkout_prefix, ctx.slot.name);
         let target = format!("{}{}", remote.target_prefix, ctx.slot.name);
-        // P10: the slot checkout exists only from the moment a job is dequeued for it, and it is
-        // only touched while the slot is idle (the script refuses with exit 7 otherwise).
-        let ensure = self
-            .transport
-            .ssh_sh(
-                &remote.ssh,
-                ENSURE_CHECKOUT,
-                &[
-                    remote.repo.clone(),
-                    checkout.clone(),
-                    sha.to_string(),
-                    ctx.slot.name.clone(),
-                    if ctx.slot.incremental { "1" } else { "0" }.to_string(),
-                    target,
-                    name.clone(),
-                ],
-            )
-            // Not 255: the script could not even be run here (ssh missing, spawn failure).
-            .map_err(|e| StartError::Failed(format!("cannot run ssh: {e}")))?;
-        if unreachable(&ensure) {
-            return Err(StartError::HostBusy(format!(
-                "host unreachable: {}",
-                ensure.stderr.trim()
-            )));
-        }
-        match ensure.code {
-            0 => {}
-            7 => return Err(StartError::Busy(first_line(&ensure.stdout, &ensure.stderr))),
-            _ => {
-                return Err(StartError::Failed(first_line(
-                    &ensure.stdout,
-                    &ensure.stderr,
-                )));
-            }
-        }
-        if ensure.stdout.trim_start().starts_with("already running") {
-            // A retry whose first start did succeed: adopt it, touch nothing.
-            return Ok(self.confirmed(&remote.ssh, &name));
-        }
         let mut args = vec![s("start")];
         match (&remote.mode, job.lease_id.is_some()) {
             (StartMode::Admit, true) => args.push(s("--quiet-window")),
@@ -346,6 +280,14 @@ impl Executor for RemoteExecutor {
             }
             (StartMode::Plain, _) => {}
         }
+        // P10: the checkout happens inside the start, under the host's slot lock.
+        args.extend([
+            s("--checkout"),
+            remote.repo.clone(),
+            sha.to_string(),
+            target,
+            s(if ctx.slot.incremental { "1" } else { "0" }),
+        ]);
         args.extend([
             remote.ssh.clone(),
             checkout,
@@ -367,7 +309,8 @@ impl Executor for RemoteExecutor {
                 )));
             }
         };
-        let text = out.stdout.trim().to_string();
+        // Warnings and notes come before the verdict and must not be read as one.
+        let text = verdict(&out.stdout);
         match out.code {
             0 => Ok(Started {
                 // `Some(0)` = started on the host, pid not read (never treated as not started).
@@ -389,6 +332,15 @@ impl Executor for RemoteExecutor {
         let (Some(name), Some(host)) = (job.remote_name.clone(), self.ssh_of(job)) else {
             return Probe::Gone("remote job name was not recorded".into());
         };
+        // A start that was never confirmed is settled first: fenced off, it can safely run
+        // again under a new name; otherwise the host has the job and `status` describes it.
+        if job.pid.is_none() {
+            match self.fence(&host, &name) {
+                Fence::NeverRuns => return Probe::NotStarted,
+                Fence::Started => {}
+                Fence::Unknown(why) => return Probe::Unknown(why),
+            }
+        }
         let out = match self.cargo(vec![s("status"), host.clone(), name.clone()]) {
             Ok(out) if !unreachable(&out) => out,
             Ok(out) => return Probe::Unknown(out.stderr.trim().to_string()),
@@ -415,9 +367,6 @@ impl Executor for RemoteExecutor {
         }
         match text {
             "died" => Probe::Gone("the job died on the host without an exit marker".into()),
-            // A start that was never confirmed (no pid recorded) and that the host has never heard of
-            // did not happen: requeue it. A confirmed job the host forgot was lost.
-            "unknown" if job.pid.is_none() => Probe::NotStarted,
             "unknown" => Probe::Gone("the host no longer knows this job (rebooted?)".into()),
             other => Probe::Unknown(format!("unexpected status output {other:?}")),
         }
@@ -453,26 +402,29 @@ impl Executor for RemoteExecutor {
 }
 
 impl RemoteExecutor {
-    /// Decide what an unconfirmed `start` did, from the host's own `status` of the job name:
-    /// running or finished means it started (adopt it); a name the host does not know means it
-    /// did not (requeue); an unreachable host leaves the job claimed with no pid, and `probe`
-    /// settles it later (`NotStarted` requeues, anything else follows the normal path).
+    /// Ask the host to settle whether the job `name` ever runs (see the module docs).
+    fn fence(&self, ssh: &str, name: &str) -> Fence {
+        match self.cargo(vec![s("fence"), ssh.to_string(), name.to_string()]) {
+            Ok(out) if out.code == 0 => match out.stdout.trim() {
+                "fenced" => Fence::NeverRuns,
+                text if text == "started" || text.starts_with("exit ") => Fence::Started,
+                text => Fence::Unknown(format!("unexpected fence output {text:?}")),
+            },
+            Ok(out) => Fence::Unknown(first_line(&out.stdout, &out.stderr)),
+            Err(error) => Fence::Unknown(error),
+        }
+    }
+
+    /// Decide what an unconfirmed `start` did: a job the host has is adopted; one fenced off is
+    /// queued again; an unreachable host leaves the job claimed with no pid, and `probe` settles
+    /// it later.
     fn confirm_start(&self, ssh: &str, name: &str, why: &str) -> Result<Started, StartError> {
-        match self.cargo(vec![s("status"), ssh.to_string(), name.to_string()]) {
-            Ok(out) if !unreachable(&out) => {
-                let text = out.stdout.trim();
-                if text == "running" || text.starts_with("exit ") {
-                    Ok(self.confirmed(ssh, name))
-                } else if text == "unknown" {
-                    Err(StartError::HostBusy(format!(
-                        "{why}; the host has no such job"
-                    )))
-                } else {
-                    Err(StartError::Failed(format!("{why} but the job is {text}")))
-                }
-            }
-            // Cannot ask: claimed with no pid; a later probe settles it.
-            _ => Ok(Started {
+        match self.fence(ssh, name) {
+            Fence::Started => Ok(self.confirmed(ssh, name)),
+            Fence::NeverRuns => Err(StartError::HostBusy(format!(
+                "{why}; the job never started and is fenced off"
+            ))),
+            Fence::Unknown(_) => Ok(Started {
                 remote_name: Some(name.to_string()),
                 ..Started::default()
             }),
@@ -550,6 +502,17 @@ fn is_transient_refusal(text: &str) -> bool {
     ]
     .iter()
     .any(|marker| text.contains(marker))
+}
+
+/// The script's output without its `warning:` and `note:` lines.
+fn verdict(stdout: &str) -> String {
+    stdout
+        .lines()
+        .filter(|line| !line.starts_with("warning:") && !line.starts_with("note:"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 fn parse_pid(text: &str) -> Option<i64> {

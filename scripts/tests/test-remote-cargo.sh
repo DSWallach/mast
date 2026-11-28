@@ -276,4 +276,37 @@ check "the window can be taken again once jobs finish" 0 "started" -- rc start -
 check "the window job finishes" 0 "exit 0" -- rc wait h $tag-q9 20s
 unset FAKE_FLOCK_REAL REMOTE_CARGO_SLOT_PREFIX REMOTE_CARGO_QUIET_LOCK REMOTE_CARGO_ADMIT_LOCK REMOTE_CARGO_DEVICE_LOCK REMOTE_CARGO_QUIET_WAIT REMOTE_CARGO_DEVICE_WAIT REMOTE_CARGO_MIN_MEM_KIB REMOTE_CARGO_JOB_MEM_KIB FAKE_DF_AVAIL_KIB
 
+# --checkout: the slot checkout moves only inside the start, under the slot lock, while the slot is idle.
+export FAKE_FLOCK_REAL=1 REMOTE_CARGO_SLOT_PREFIX="$tmp/co-slot-" REMOTE_CARGO_QUIET_LOCK="$tmp/co-quiet.lock" \
+    REMOTE_CARGO_ADMIT_LOCK="$tmp/co-admit.lock" REMOTE_CARGO_DEVICE_LOCK="$tmp/co-device.lock" REMOTE_CARGO_MIN_MEM_KIB=1
+G() { git -c user.name=t -c user.email=t@example.com -C "$HOME/Work/repo" "$@"; }
+mkdir -p "$HOME/Work/repo"
+G init -q; G commit -q --allow-empty -m one; one=$(G rev-parse HEAD); G commit -q --allow-empty -m two; two=$(G rev-parse HEAD)
+rm -rf "$HOME/Work/mast-wt-build-a" "$HOME/Work/mast-slot-a.env"
+head_of() { git -C "$HOME/Work/mast-wt-build-a" rev-parse HEAD; }
+co() { # co <sha> <name> <cargo word>
+    rc start --admit --checkout Work/repo "$1" Work/mast-target-a 1 h Work/mast-wt-build-a a "$2" -- cargo "$3"
+}
+check "an admitted start creates the missing slot checkout" 0 "started" -- co "$one" $tag-co1 sleep
+[ "$(head_of)" = "$one" ] && pass "the checkout is at the job's commit" || fail "the checkout is not at the job's commit"
+check "another owner's start is refused while the slot's job runs" 1 "slot a busy" -- co "$two" $tag-co2 ok
+[ "$(head_of)" = "$one" ] && pass "a refused start did not move the checkout" || fail "a refused start moved the checkout"
+[ ! -e "/tmp/$tag-co2.pid" ] && pass "a busy refusal leaves no pid file" || fail "a busy refusal left a pid file"
+check "fence reports a running job as started" 0 started -- rc fence h $tag-co1
+check "the fence left the running job alone" 0 running -- rc status h $tag-co1
+check "stop co1" 0 "stopped" -- rc stop h $tag-co1
+check "fence reports a finished job's exit" 0 "exit 143" -- rc fence h $tag-co1
+check "an idle slot moves to the next commit" 0 "started" -- co "$two" $tag-co3 env
+check "wait co3" 0 "INC=1 TGT=$HOME/Work/mast-target-a" -- rc wait h $tag-co3 20s
+[ "$(head_of)" = "$two" ] && pass "the idle slot moved" || fail "the idle slot did not move"
+check "a commit the host does not have is refused" 1 "is not on this host" -- co 0123456789012345678901234567890123456789 $tag-co4 ok
+[ ! -e "/tmp/$tag-co4.pid" ] && pass "a failed checkout leaves no pid file" || fail "a failed checkout left a pid file"
+check "fence before the start arrives" 0 fenced -- rc fence h $tag-co5
+check "a fence is repeatable" 0 fenced -- rc fence h $tag-co5
+check "a fenced start that arrives late is refused" 1 "name in use" -- co "$one" $tag-co5 ok
+[ "$(head_of)" = "$two" ] && pass "a fenced start did not move the checkout" || fail "a fenced start moved the checkout"
+check "--checkout refuses a path outside HOME" 2 "Usage" -- rc start --checkout ../repo "$one" t 0 h wt a $tag-co6 -- cargo ok
+check "--checkout refuses an option-like commit" 2 "Usage" -- rc start --checkout Work/repo --force t 0 h wt a $tag-co7 -- cargo ok
+unset FAKE_FLOCK_REAL REMOTE_CARGO_SLOT_PREFIX REMOTE_CARGO_QUIET_LOCK REMOTE_CARGO_ADMIT_LOCK REMOTE_CARGO_DEVICE_LOCK REMOTE_CARGO_MIN_MEM_KIB
+
 [ "$failures" = 0 ] && echo "all passed" || echo "$failures failed"

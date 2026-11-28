@@ -20,13 +20,11 @@
 //! - [`remote_executor`]: SSH execution that delegates to `scripts/remote-cargo.sh`, including the
 //!   lazy slot checkout (P10).
 //!
-//! # Known limit: one engine owns a host's slots
+//! # Sharing a host
 //!
-//! The checkout step holds the script's slot lock, but the lock is released before
-//! `remote-cargo.sh start` takes it again, so a second engine (or a hand-run job) sharing the
-//! same slot can move the checkout in that gap and one job can build the other's commit. The
-//! queue assumes it is the only thing that checks out and starts jobs in a host's slots; W3-T2
-//! must wire exactly one engine to each remote host.
+//! No engine owns a remote host: the checkout and the start happen under the host's own slot
+//! lock, so several queues (or hand-run `remote-cargo.sh` jobs) can share its slots; see
+//! [`remote_executor`]. A lost start answer is settled by fencing the attempt on the host.
 //!
 //! # `cargo test` versus `cargo nextest`: what holds the build-directory lock
 //!
@@ -509,6 +507,8 @@ struct Inner {
     clock: Clock,
     notify: Arc<tokio::sync::Notify>,
     holds: Mutex<HashMap<String, Hold>>,
+    /// Held for one scheduling pass (or recovery).
+    pass: Mutex<()>,
     /// Host id -> (until, reason): starts on the host pause after a host-level refusal.
     host_backoff: Mutex<HashMap<String, (i64, String)>>,
     /// Job id -> until: an unreadable job is probed again only after this time (no ssh storm).
@@ -596,6 +596,7 @@ impl BuildJobsBuilder {
                 clock,
                 notify: Arc::new(tokio::sync::Notify::new()),
                 holds: Mutex::new(HashMap::new()),
+                pass: Mutex::new(()),
                 host_backoff: Mutex::new(HashMap::new()),
                 probe_backoff: Mutex::new(HashMap::new()),
                 disk_backoff: Mutex::new(HashMap::new()),
@@ -846,11 +847,14 @@ impl BuildJobs {
     /// Reconcile `running` rows after an engine start: finish from an exit file, re-adopt a live
     /// supervisor (same PID and start time), mark anything else `lost`. Call once before ticking.
     pub fn recover(&self) -> Result<Recovered, BuildJobError> {
+        let _pass = self.inner.pass.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         recovery::recover(self)
     }
 
     /// One scheduling pass: reap, enforce timeouts and the abort gate, start, deliver wakes.
     pub fn tick(&self) {
+        // One pass at a time: a second pass must not probe (and fence) a start still in flight.
+        let _pass = self.inner.pass.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = self.now();
         for host in &self.inner.cfg.hosts {
             self.tick_host(host, now);
@@ -1041,7 +1045,8 @@ impl BuildJobs {
         let Some(slot_config) = host.slot(slot) else {
             return StartOutcome::Skipped;
         };
-        let remote_name = format!("mastbj-{}", job.id);
+        // One name per attempt: a fenced-off name is spent, and a retry never collides with it.
+        let remote_name = format!("mastbj-{}-{}", job.id, &crate::new_id()[..8]);
         match store.claim_running(&job.id, slot, &remote_name, now) {
             Ok(true) => {}
             Ok(false) => return StartOutcome::Skipped,

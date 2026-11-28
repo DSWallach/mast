@@ -7,10 +7,19 @@ set -eu
 usage() {
     cat >&2 <<'EOF'
 Usage:
-  scripts/remote-cargo.sh start [--device-serial <serial> | --admit | --quiet-window] <host> <remote worktree> <slot> <name> -- cargo <args...>
+  scripts/remote-cargo.sh start [--device-serial <serial> | --admit | --quiet-window]
+                                [--checkout <repo> <sha> <target dir> <0|1>]
+                                <host> <remote worktree> <slot> <name> -- cargo <args...>
   scripts/remote-cargo.sh wait <host> <name> <minutes|Ns>
   scripts/remote-cargo.sh status <host> <name>
   scripts/remote-cargo.sh stop <host> <name>
+  scripts/remote-cargo.sh fence <host> <name>
+--checkout: create or move <remote worktree> to commit <sha> of <repo> as part of the start, under the slot
+lock and only once the slot is idle, so no other start (from any machine) can move it between the checkout
+and the job. It writes ~/Work/mast-slot-<slot>.env (CARGO_TARGET_DIR ~/<target dir>, CARGO_INCREMENTAL
+<0|1>) unless an unmanaged file is there. <repo> and <target dir> are relative to $HOME.
+fence: settle a start whose answer was lost. Prints "fenced" when the job has not started and now never
+will, "started" when its runner claimed it, or "exit <code>". The name stays used either way.
 --admit: concurrent slots. Only slots a b c, each in ~/Work/mast-wt-build-<slot> with CARGO_TARGET_DIR
 ~/Work/mast-target-<slot>, and CARGO_INCREMENTAL=0 except in slot a. Refuses when REMOTE_CARGO_MAX_JOBS (3)
 jobs already run, when free disk after reserving 10 GiB per running job is under 15 GiB, or when
@@ -71,8 +80,8 @@ run_remote() {
 }
 
 START=$(cat <<'EOF'
-dir=$1 slot=$2 name=$3 device=$4 mode=$5
-shift 5
+dir=$1 slot=$2 name=$3 device=$4 mode=$5 repo=$6 sha=$7 target=$8 incr=$9
+shift 9
 f=/tmp/$name
 pfx=${REMOTE_CARGO_SLOT_PREFIX:-/tmp/remote-cargo-slot-}
 slotf=$pfx$slot.job
@@ -91,7 +100,16 @@ conf() { ( if [ -f "$HOME/Work/mast-remote-cargo.conf" ]; then . "$HOME/Work/mas
 confbad="refused: cannot read ~/Work/mast-remote-cargo.conf (a syntax error or a failing command)"
 slotbad="refused: cannot read the slot env ~/Work/mast-slot-<slot>.env (a syntax error or a failing command)"
 num() { case $2 in '' | *[!0-9]*) fail "refused: $1 is not a number: '$2'" ;; esac; }
-if [ ! -d "$dir" ]; then echo "no such directory on host: $dir"; exit 1; fi
+# With --checkout the directory may not exist yet: it is created under the slot lock below.
+[ "$sha" = - ] || case $dir in /*) ;; *) dir=$HOME/$dir ;; esac
+if [ "$sha" = - ] && [ ! -d "$dir" ]; then echo "no such directory on host: $dir"; exit 1; fi
+# physical <path>: the physical path of a directory, or of its parent when it does not exist yet.
+physical() {
+    if [ -d "$1" ]; then (cd "$1" && pwd -P); else
+        up=$(cd "$(dirname "$1")" 2>/dev/null && pwd -P) || return 0
+        printf '%s/%s\n' "$up" "$(basename "$1")"
+    fi
+}
 if [ -e "$f.log" ] || [ -e "$f.exit" ] || [ -e "$f.claim" ]; then echo "name in use: $name"; exit 1; fi
 (set -C; echo $$ > "$f.pid") 2>/dev/null || { echo "name in use: $name"; exit 1; }
 if [ "$mode" != - ]; then
@@ -105,7 +123,8 @@ if [ "$mode" != - ]; then
     for sl in $slots; do [ "$sl" = "$slot" ] && ok=1; done
     [ "$ok" = 1 ] || fail "refused: slot $slot is not one of: $slots"
     want=$(conf "REMOTE_CARGO_DIR_$slot" "$HOME/Work/mast-wt-build-$slot") || fail "$confbad"
-    d1=$(cd "$dir" && pwd -P); d2=$(cd "$want" 2>/dev/null && pwd -P || true)
+    d1=$(physical "$dir"); d2=$(physical "$want")
+    [ "$sha" != - ] || [ -d "$want" ] || d2=
     [ -n "$d2" ] && [ "$d1" = "$d2" ] || fail "refused: slot $slot must run in $want, not $dir"
     tgt=$(if [ -f "$HOME/Work/mast-slot-$slot.env" ]; then . "$HOME/Work/mast-slot-$slot.env" || exit 1; else CARGO_TARGET_DIR=$HOME/Work/mast-target-$slot; fi; printf %s "${CARGO_TARGET_DIR-}") || fail "$slotbad"
     [ "$tgt" = "$HOME/Work/mast-target-$slot" ] || fail "refused: slot $slot must use CARGO_TARGET_DIR $HOME/Work/mast-target-$slot, its env gives '$tgt'"
@@ -180,6 +199,30 @@ exec 9> "${pfx}$slot.lock"
 if ! flock -w 10 9; then echo "slot $slot lock timeout"; rm -f "$f.pid"; exit 1; fi
 old=$(cat "$slotf" 2>/dev/null || true)
 if busy "$old"; then echo "slot $slot busy: $old"; rm -f "$f.pid"; exit 1; fi
+# A fence that arrived while this launcher waited: do not touch the slot.
+[ ! -e "$f.claim" ] || fail "refused: the start of $name was fenced off"
+if [ "$sha" != - ]; then
+    # The slot is idle and its lock (descriptor 9) is held from the check above until this job's
+    # name is in the slot file, so nothing can move the checkout under a job.
+    repo=$HOME/$repo
+    [ -e "$repo/.git" ] || fail "no repository at $repo on this host"
+    git -C "$repo" cat-file -e "$sha^{commit}" 2>/dev/null || fail "commit $sha is not on this host; push the branch to it first"
+    if [ ! -e "$dir/.git" ]; then
+        git -C "$repo" worktree add --detach "$dir" "$sha" >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- || fail "could not create the slot checkout $dir"
+    fi
+    if [ "$(git -C "$dir" rev-parse HEAD)" != "$(git -C "$repo" rev-parse "$sha^{commit}")" ]; then
+        git -C "$dir" checkout --detach --force "$sha" >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- || fail "could not check out $sha in $dir"
+    fi
+    mkdir -p "$HOME/Work"
+    envf=$HOME/Work/mast-slot-$slot.env
+    marker='# managed by mast build_jobs'
+    if [ ! -e "$envf" ] || head -n 1 "$envf" | grep -qF "$marker"; then
+        { echo "$marker"; echo "CARGO_TARGET_DIR=\$HOME/$target"; echo "CARGO_INCREMENTAL=$incr"; echo "export CARGO_TARGET_DIR CARGO_INCREMENTAL"; } > "$envf.tmp.$$" && mv "$envf.tmp.$$" "$envf"
+    else
+        echo "note: leaving the unmanaged $envf in place"
+    fi
+    [ ! -e "$f.claim" ] || fail "refused: the start of $name was fenced off"
+fi
 echo "$name" > "$slotf"
 if [ "$mode" = quiet ]; then echo "$name quiet" > "$quietlock.holder"; fi
 exec 9>&- 7>&-
@@ -265,6 +308,18 @@ echo died; exit 1
 EOF
 )
 
+# The claim file is the one atomic decision about whether a job ever runs: the runner creates it
+# with "run" before it runs anything, and creating it first with "abandoned" stops every runner,
+# including one whose start has not reached the host yet (start refuses a claimed name).
+FENCE=$(cat <<'EOF'
+f=/tmp/$1
+if [ -e "$f.exit" ]; then echo "exit $(cat "$f.exit")"; exit 0; fi
+if (set -C; echo abandoned > "$f.claim") 2>/dev/null; then echo fenced; exit 0; fi
+[ -e "$f.claim" ] || { echo "cannot write $f.claim"; exit 1; }
+if [ "$(cat "$f.claim")" = abandoned ]; then echo fenced; else echo started; fi
+EOF
+)
+
 STOP=$(cat <<'EOF'
 name=$1
 f=/tmp/$name
@@ -299,6 +354,7 @@ shift
 # device lock and checks no free space, as before.
 device=-
 mode=-
+repo=- sha=- target=- incr=-
 while [ "$cmd" = start ]; do
     case ${1-} in
     --device-serial)
@@ -308,6 +364,17 @@ while [ "$cmd" = start ]; do
         shift 2 ;;
     --admit) [ "$mode" = - ] || usage; mode=admit; shift ;;
     --quiet-window) [ "$mode" = - ] || usage; mode=quiet; shift ;;
+    --checkout)
+        [ "$#" -ge 5 ] && [ "$sha" = - ] || usage
+        repo=$2 sha=$3 target=$4 incr=$5
+        for rel in "$repo" "$target"; do
+            valid "$rel" ./ || usage
+            case $rel in /* | -* | *..*) usage ;; esac
+        done
+        case $sha in *[!0-9a-fA-F]*) usage ;; esac
+        [ "${#sha}" -ge 7 ] || usage
+        case $incr in 0 | 1) ;; *) usage ;; esac
+        shift 5 ;;
     *) break ;;
     esac
 done
@@ -328,7 +395,7 @@ start)
     # The host runs what follows `--`, and an approval rule can only match the text of this call,
     # so the script itself keeps that to cargo.
     [ "$1" = cargo ] || { echo "only a cargo command runs on the build host" >&2; exit 2; }
-    run_remote "$host" "$START" "$dir" "$slot" "$name" "$device" "$mode" "$@"
+    run_remote "$host" "$START" "$dir" "$slot" "$name" "$device" "$mode" "$repo" "$sha" "$target" "$incr" "$@"
     ;;
 wait)
     [ "$#" -eq 2 ] || usage
@@ -342,6 +409,11 @@ status)
     [ "$#" -eq 1 ] || usage
     valid "$1" . || usage
     run_remote "$host" "$STATUS" "$1"
+    ;;
+fence)
+    [ "$#" -eq 1 ] || usage
+    valid "$1" . || usage
+    run_remote "$host" "$FENCE" "$1"
     ;;
 stop)
     [ "$#" -eq 1 ] || usage
