@@ -202,7 +202,7 @@ impl EngineRpc {
         let observed = crate::handoff_roles::RoleObservations::capture(
             &self.workspace, &self.sessions.agent_tokens(), &source_chat,
         );
-        self.launch.create_orchestrator_successor(
+        let reply = self.launch.create_orchestrator_successor(
             &launch, &self.orchestrator_wakes, &source,
             crate::work_outline_launch::HandOffOrigin::User { archive: Some(true), observed_roles: &observed, automatic: false },
         ).await.map_err(|error| mast_proto::work_outline::WorkOutlineError::new(
@@ -211,7 +211,9 @@ impl EngineRpc {
                 "Continuing worker {source} as a hand-off did not start ({}); {source} still owns this assignment. Retry with the same idempotency key, or pass newChat to start a separate assignment.",
                 error.message
             ),
-        ))
+        ))?;
+        self.launch.mark_continued(&reply.chat_id, &source);
+        Ok(reply)
     }
 }
 

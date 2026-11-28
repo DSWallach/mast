@@ -6328,7 +6328,9 @@ impl Render for Pickers {
         // brightens only when something departs from its default. No suffix
         // when the model has neither a ladder nor options (e.g. Hermes).
         // What the chip reads, for the headless UI driver: model, then its traits.
-        let chip_state = format!("{model_label}|{}", traits_set.clone().unwrap_or_default());
+        // Only built where a selector is kept (debug builds); release builds skip it.
+        let chip_state = cfg!(debug_assertions)
+            .then(|| format!("{model_label}|{}", traits_set.clone().unwrap_or_default()));
         let chip_suffix = traits_set.map(|summary| {
             (
                 SharedString::from(summary),
@@ -6387,7 +6389,7 @@ impl Render for Pickers {
                     }
                 }))
         } else {
-            model_chip.debug_selector(move || format!("composer-model-chip:{chip_state}"))
+            model_chip.debug_selector(move || format!("composer-model-chip:{}", chip_state.unwrap_or_default()))
         };
         let model_chip = if new_chat {
             if overlay

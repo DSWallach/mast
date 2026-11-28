@@ -853,17 +853,38 @@ impl WorkItemLaunchService {
             // The stalled chat's account pin is always dropped, on its own harness
             // too: a successor never inherits it.
             request.account_id = None;
-            return self.create_chat_for_work_item(&request).await;
+            let reply = self.create_chat_for_work_item(&request).await?;
+            self.mark_continued(&reply.chat_id, stalled);
+            return Ok(reply);
         };
         let observed = crate::handoff_roles::RoleObservations::capture(
             &self.workspace, &self.sessions.agent_tokens(), &source_chat,
         );
         let _gate = self.gate.lock().await;
-        self.create_orchestrator_successor_locked(
+        let reply = self.create_orchestrator_successor_locked(
             &request, wakes, stalled,
             HandOffOrigin::User { archive: Some(false), observed_roles: &observed, automatic: false },
             None, false,
-        ).await
+        ).await?;
+        self.mark_continued(&reply.chat_id, stalled);
+        Ok(reply)
+    }
+
+    /// Give an engine-made continuation (a credit-limit successor, a stopped
+    /// worker continued by a launch) a title that tells it from its source:
+    /// the source's title plus " (continued)". A successor the user already
+    /// renamed, and a repeat call, keep what they have.
+    pub(crate) fn mark_continued(&self, successor: &str, source: &str) {
+        let title = |id: &str| self.workspace.chat(id).ok().flatten().and_then(|chat| chat.title)
+            .filter(|title| !title.trim().is_empty());
+        let (Some(source_title), Some(current)) = (title(source), title(successor)) else { return };
+        if current != source_title {
+            return;
+        }
+        let base = source_title.trim_end_matches(" (continued)");
+        if let Err(error) = self.workspace.rename_chat(successor, &format!("{base} (continued)")) {
+            tracing::warn!(chat = %successor, %error, "could not title the continuation");
+        }
     }
 
     /// Whether the successor chat for `operation_id` has its first turn queued
