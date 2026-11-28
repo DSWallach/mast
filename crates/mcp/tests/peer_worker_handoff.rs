@@ -56,6 +56,13 @@ impl Harness for RecordingClaude {
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
     }
+    fn instruction_support(&self) -> mast_harness::InstructionSupport {
+        mast_harness::InstructionSupport::Supported {
+            channel: mast_harness::InstructionChannel::Test,
+            replace_strategy: mast_harness::InstructionReplaceStrategy::RespawnResume,
+            max_bytes: 64 * 1024,
+        }
+    }
     async fn run(&self, request: RunRequest, controls: RunControls) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.prompts.lock().unwrap().push(request.prompt.clone());
         let msg_id = format!("a-{}", self.next_msg.fetch_add(1, Ordering::Relaxed) + 1);
