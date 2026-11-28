@@ -686,7 +686,7 @@ impl Rig {
         while !f() {
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "timed out waiting for {what}: {:?} {:?}", self.core.sessions.session_status("stamp-w"), self.prompts.lock().unwrap()
+                "timed out waiting for {what}"
             );
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
@@ -2239,9 +2239,14 @@ async fn a_completion_report_is_stamped_with_the_workers_token_totals() {
     let rig = Rig::new().await;
     space_worker(&rig, "stamp-w", Some(MGR), autonomous_spec(), Some("/tmp".into()), None).await;
     space_worker(&rig, "unmeasured-w", Some(MGR), autonomous_spec(), Some("/tmp".into()), None).await;
-    // An autonomous worker is auto-continued whenever the master switch is on, and the nudge would start a
-    // second turn that this test never releases. Only `enabled: false` stops it; the stamp does not need wakes.
-    rig.wakes.set_settings(MGR, WakeSettings { enabled: false, ..Default::default() }).await;
+    // An open item gets an auto-continue nudge when the worker's turn ends, and that second turn would
+    // never be released here. A completed item is not nudged.
+    let item = mast_proto::derive_id("create-stamp-w", mast_proto::roles::ITEM);
+    let actor = mast_proto::WorkOutlineActor { kind: mast_proto::WorkOutlineActorKind::User, device_id: rig.core.device_id.clone(), ..Default::default() };
+    let complete: mast_proto::WorkOutlineMutation = serde_json::from_value(serde_json::json!({
+        "op": "updateWorkItem", "workItemId": item, "changes": {"status": "completed"}, "operationId": "complete-stamp-w"
+    })).unwrap();
+    rig.core.workspace.work_outline_mutate(&complete, &actor, &[]).unwrap();
     rig.core.doc_host.queue_message("stamp-w", "measured", Vec::new()).unwrap();
     rig.wait_for(|| rig.core.sessions.turn_in_flight("stamp-w") && rig.prompts.lock().unwrap().iter().any(|p| p == "measured"), "the measured turn").await;
     let _ = rig.finish.send(());
