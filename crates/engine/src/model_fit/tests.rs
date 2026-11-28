@@ -964,3 +964,169 @@ fn seeded_probes_are_deterministic_and_near_ten_percent() {
     let probes = first.iter().filter(|probe| **probe).count();
     assert!((25..=80).contains(&probes), "{probes} probes in 500");
 }
+
+/// Floor raised to Medium, cooldown over (so a canary would be eligible), and
+/// `haiku` and `flash` demoted for the class.
+fn canary_ready_rig() -> Rig {
+    let mut rig = rig(0.0);
+    raise_floor_to_medium(rig.router.ledger());
+    rig.clock.set(T0 + 7 * DAY);
+    rig
+}
+
+#[test]
+fn item_pin_is_used_even_below_the_floor_demoted_or_without_headroom() {
+    let mut rig = rig(0.0);
+    raise_floor_to_medium(rig.router.ledger()); // haiku and flash demoted, floor Medium
+    let quota = Quota {
+        empty: BTreeSet::from([model("haiku")]),
+        ..Default::default()
+    };
+    let pinned = RouteRequest {
+        item_pin: Some(model("haiku")),
+        ..request()
+    };
+    let chosen = pick(&mut rig, &pinned, &quota);
+    assert_eq!(chosen.model, model("haiku"));
+    assert!(chosen.pinned && !chosen.canary);
+    assert_eq!(rig.rolls.get(), 0);
+}
+
+#[test]
+fn item_pin_is_never_escalated_by_a_swap_or_a_raised_floor() {
+    let mut rig = rig(0.0);
+    raise_floor_to_medium(rig.router.ledger());
+    let pinned = RouteRequest {
+        item_pin: Some(model("mini")),
+        min_tier: Some(ModelTier::Large),
+        critical: true,
+        ..request()
+    };
+    assert_eq!(
+        pick(&mut rig, &pinned, &Quota::default()).model,
+        model("mini")
+    );
+}
+
+#[test]
+fn item_pin_is_never_canaried_when_a_canary_would_be_eligible() {
+    let mut rig = canary_ready_rig();
+    let pinned = RouteRequest {
+        item_pin: Some(model("codex")),
+        ..request()
+    };
+    let chosen = pick(&mut rig, &pinned, &Quota::default());
+    assert_eq!(chosen.model, model("codex"));
+    assert!(!chosen.canary);
+    assert_eq!(rig.rolls.get(), 0);
+}
+
+#[test]
+fn project_pin_is_used_and_the_item_pin_wins_over_it() {
+    let mut rig = rig(0.5);
+    let project = RouteRequest {
+        project_pin: Some(model("opus")),
+        ..request()
+    };
+    let chosen = pick(&mut rig, &project, &Quota::default());
+    assert_eq!(chosen.model, model("opus"));
+    assert!(chosen.pinned);
+
+    let both = RouteRequest {
+        item_pin: Some(model("sonnet")),
+        project_pin: Some(model("opus")),
+        ..request()
+    };
+    assert_eq!(
+        pick(&mut rig, &both, &Quota::default()).model,
+        model("sonnet")
+    );
+}
+
+#[test]
+fn project_pin_is_never_demoted_or_canaried() {
+    let mut rig = canary_ready_rig();
+    let project = RouteRequest {
+        project_pin: Some(model("flash_unlisted_but_demoted")),
+        ..request()
+    };
+    // Not among the candidates: an error, never a substitute.
+    let err = rig
+        .router
+        .select(&project, &candidates(), &Quota::default())
+        .unwrap_err();
+    assert!(matches!(err, RouteError::PinnedModelUnavailable(_)));
+
+    let project = RouteRequest {
+        project_pin: Some(model("haiku")),
+        ..request()
+    };
+    let chosen = pick(&mut rig, &project, &Quota::default());
+    assert_eq!(chosen.model, model("haiku"));
+    assert!(!chosen.canary);
+    assert_eq!(rig.rolls.get(), 0);
+}
+
+#[test]
+fn pinned_selection_does_not_touch_the_ledger() {
+    let mut rig = rig(0.0);
+    let mut stale = candidates();
+    stale[3].version = "2.0".into(); // haiku shows a new version
+    let pinned = RouteRequest {
+        item_pin: Some(model("opus")),
+        ..request()
+    };
+    let before = rig.router.ledger().floor(&class()).unwrap();
+    rig.router
+        .select(&pinned, &stale, &Quota::default())
+        .unwrap();
+    assert_eq!(rig.router.ledger().floor(&class()).unwrap(), before);
+}
+
+#[test]
+fn experiment_pinned_item_never_triggers_canary_or_model_change() {
+    let mut rig = canary_ready_rig();
+    // Everything that would move an ordinary item: a raised floor, an expired
+    // cooldown with a canary candidate, a demotion of the pinned model, a
+    // swap-up tier and an exhausted quota.
+    let quota = Quota {
+        empty: BTreeSet::from([model("flash")]),
+        ..Default::default()
+    };
+    for pin in ["codex", "haiku", "mini"] {
+        let experiment = RouteRequest {
+            experiment_pinned: true,
+            item_pin: Some(model(pin)),
+            min_tier: Some(ModelTier::Large),
+            ..request()
+        };
+        for _ in 0..20 {
+            let chosen = pick(&mut rig, &experiment, &quota);
+            assert_eq!(chosen.model, model(pin));
+            assert!(chosen.pinned && !chosen.canary);
+        }
+    }
+    assert_eq!(rig.rolls.get(), 0);
+
+    // Pinned at project level only: same.
+    let project = RouteRequest {
+        experiment_pinned: true,
+        project_pin: Some(model("codex")),
+        ..request()
+    };
+    let chosen = pick(&mut rig, &project, &quota);
+    assert_eq!(chosen.model, model("codex"));
+    assert!(!chosen.canary);
+
+    // Without a pin there is no model to hold fixed: refuse rather than route.
+    let unpinned = RouteRequest {
+        experiment_pinned: true,
+        ..request()
+    };
+    let err = rig
+        .router
+        .select(&unpinned, &candidates(), &quota)
+        .unwrap_err();
+    assert!(matches!(err, RouteError::ExperimentWithoutPin));
+    assert_eq!(rig.rolls.get(), 0);
+}

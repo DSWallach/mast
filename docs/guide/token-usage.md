@@ -195,3 +195,13 @@ build, export that value before invoking Cargo. Cargo tracks the environment
 value even in the shared cache. Builds without explicit provenance report
 **unknown**, rather than risking another worktree's commit label. This metadata
 does not cause engine rebuilds on unrelated UI edits.
+
+## Model fit and pins
+
+Mast keeps a per-Space record of which models fail at which kinds of task, and
+routes each task to the cheapest model that is allowed to take it. An explicit
+model pin on an item or project always wins: a pinned model is never demoted,
+escalated or probed with a cheaper one. Scorecard (`experiment_pinned`) items
+likewise never get a canary probe or an automatic model change. See
+[model fit](../internal/model-fit.md) for how floors, demotions and canaries
+work. Routing is not yet connected to launch.

@@ -93,6 +93,21 @@ pub struct RouteRequest {
     /// Raises the floor for this selection only, as when a worker is swapped
     /// for one a tier up ([`super::tier_above`]).
     pub min_tier: Option<ModelTier>,
+    /// Model pinned on the work item. Wins over `project_pin`.
+    pub item_pin: Option<ModelKey>,
+    /// Model pinned for the project.
+    pub project_pin: Option<ModelKey>,
+    /// The item is a scorecard (`S`/`V`) experiment item
+    /// (`WorkItemTaskSpec::experiment_pinned`). It must run on a pinned model
+    /// and is never canaried, escalated or moved.
+    pub experiment_pinned: bool,
+}
+
+impl RouteRequest {
+    /// The model a pin fixes for this request: the item's, else the project's.
+    pub fn pin(&self) -> Option<&ModelKey> {
+        self.item_pin.as_ref().or(self.project_pin.as_ref())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,8 +116,11 @@ pub struct Selection {
     pub tier: ModelTier,
     /// A probe below the floor. Record its outcome with `canary` set.
     pub canary: bool,
-    /// The task class's learned floor at selection time.
+    /// The task class's learned floor at selection time. For a pinned
+    /// selection, the pinned model's own tier: the ledger is not consulted.
     pub floor: ModelTier,
+    /// The model came from an item or project pin, not from routing.
+    pub pinned: bool,
 }
 
 /// Why a candidate could not take the task.
@@ -129,6 +147,14 @@ pub enum RouteError {
     /// Every candidate was rejected; each with the first reason that applied.
     #[error("no eligible model for this task")]
     NoEligibleModel(Vec<Rejected>),
+    /// The pinned model is not among the candidates. The router never
+    /// substitutes another model for a pin.
+    #[error("pinned model {0:?} is not available")]
+    PinnedModelUnavailable(ModelKey),
+    /// An experiment item needs an item or project pin to say which model it
+    /// measures.
+    #[error("experiment-pinned item has no model pin")]
+    ExperimentWithoutPin,
     #[error(transparent)]
     Ledger(#[from] EngineError),
 }
@@ -165,6 +191,12 @@ impl<C: Clock, R: UniformRng> ModelRouter<C, R> {
     /// less than half its cap. The dice are only rolled when such a candidate
     /// exists.
     ///
+    /// A pin (item, else project) short-circuits all of this: the pinned
+    /// candidate is returned as is, whatever the floor, demotions, headroom or
+    /// canary dice say, and the ledger is neither read nor written. A pin
+    /// missing from `candidates` is an error, never a substitution. An
+    /// `experiment_pinned` request without a pin is an error too.
+    ///
     /// A candidate showing a new version has its ledger state reset first (see
     /// [`ModelFitLedger::observe_version`]).
     pub fn select(
@@ -173,6 +205,22 @@ impl<C: Clock, R: UniformRng> ModelRouter<C, R> {
         candidates: &[Candidate],
         headroom: &dyn Headroom,
     ) -> Result<Selection, RouteError> {
+        if let Some(pin) = request.pin() {
+            let candidate = candidates
+                .iter()
+                .find(|candidate| candidate.model == *pin)
+                .ok_or_else(|| RouteError::PinnedModelUnavailable(pin.clone()))?;
+            return Ok(Selection {
+                model: candidate.model.clone(),
+                tier: candidate.tier,
+                canary: false,
+                floor: candidate.tier,
+                pinned: true,
+            });
+        }
+        if request.experiment_pinned {
+            return Err(RouteError::ExperimentWithoutPin);
+        }
         let now = self.clock.now_ms();
         let floor = self.ledger.floor(&request.task_class)?;
         let min_tier = floor.min_tier.max(request.min_tier.unwrap_or_default());
@@ -224,6 +272,7 @@ impl<C: Clock, R: UniformRng> ModelRouter<C, R> {
             tier: chosen.tier,
             canary,
             floor: floor.min_tier,
+            pinned: false,
         })
     }
 

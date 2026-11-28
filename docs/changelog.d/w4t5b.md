@@ -1,0 +1,1 @@
+- Model router: an item or project model pin is always honoured, and `experiment_pinned` items never get a canary probe, an escalation or a model change.

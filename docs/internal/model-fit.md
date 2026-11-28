@@ -65,6 +65,22 @@ qualifies, the error gives a reason for every candidate.
 Quota comes through the `Headroom` trait, and time and randomness through
 `Clock` and `UniformRng`.
 
+### Pins
+
+`RouteRequest::item_pin` and `project_pin` (the item's wins) name a model the
+router must use. A pinned selection returns that candidate as is: the floor,
+demotions, quota headroom, `min_tier`, `critical` and the canary dice are all
+ignored, and the ledger is neither read nor written, so a pin is never demoted,
+escalated or probed. A pin missing from the candidates is
+`RouteError::PinnedModelUnavailable`; the router never substitutes. The caller
+supplies the pins; the work-item proto has no model-pin field yet.
+
+`RouteRequest::experiment_pinned` mirrors `WorkItemTaskSpec::experiment_pinned`
+(the `S`/`V` scorecard items). Such a request needs a pin
+(`RouteError::ExperimentWithoutPin` otherwise), so it never gets a canary, an
+auto-escalation or a model change. Recording its outcomes into the ledger is the
+caller's to skip.
+
 ### Canary probes
 
 Floors come down only through canaries. A selection may probe one tier below the
