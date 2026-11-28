@@ -1,1 +1,1 @@
-- Living documents: an automatic Manager hand-off now carries every document owed an update, drifted document and queued doc note to the successor, and the merge queue can apply each landed commit to the documentation ledger.
+- Living documents (not yet active): the engine can now carry the documentation ledger across an automatic Manager hand-off and apply landed commits to it, but it is not wired to a live merge queue yet, so the ledger stays empty until a later release step installs the land hook.
