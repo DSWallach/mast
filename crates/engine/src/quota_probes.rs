@@ -433,8 +433,10 @@ mod tests {
         assert_eq!(claude.windows[0].used_fraction, 0.8);
 
         // Changed caps take effect on the next read.
-        let mut settings = QuotaSettings::default();
-        settings.soft_cap = 0.82;
+        let settings = QuotaSettings {
+            soft_cap: 0.82,
+            ..Default::default()
+        };
         quota_settings::save(root.path(), &settings).unwrap();
         assert_eq!(read().await.unwrap().wake, None);
     }
