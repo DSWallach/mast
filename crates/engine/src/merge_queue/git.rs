@@ -11,9 +11,6 @@ use std::{
     process::Output,
 };
 
-/// The object id `update-ref` reads as "this ref must not exist yet".
-pub(super) const ZERO_OID: &str = "0000000000000000000000000000000000000000";
-
 const AUTHOR_NAME: &str = "Mast MergeQueue";
 const AUTHOR_EMAIL: &str = "merge-queue@mast.invalid";
 
@@ -171,22 +168,67 @@ pub(super) fn unmerged_paths(worktree: &Path) -> Result<Vec<String>, MergeQueueE
     Ok(nul_list(&out.stdout))
 }
 
-/// The worktree that has `full_ref` checked out, if any. Moving such a ref
-/// would leave that worktree's index and files behind it.
-pub(super) fn checked_out_at(
-    dir: &Path,
-    full_ref: &str,
-) -> Result<Option<String>, MergeQueueError> {
+/// How some worktree is using the branch `full_ref`, if one is: checked out, or
+/// held by a paused rebase or a bisect, which `worktree list` shows only as
+/// detached. Moving such a ref would leave that worktree's index and files
+/// behind it, or be undone by finishing the operation. `dir` is the common git
+/// directory.
+///
+/// A checkout made after this check and before the ref update is not seen: git
+/// has no lock that covers both.
+pub(super) fn branch_in_use(dir: &Path, full_ref: &str) -> Result<Option<String>, MergeQueueError> {
     let listing = run(dir, &["worktree", "list", "--porcelain"])?;
     let mut worktree = "";
     for line in listing.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {
             worktree = path;
         } else if line.strip_prefix("branch ") == Some(full_ref) {
-            return Ok(Some(worktree.to_owned()));
+            return Ok(Some(format!("checked out at {worktree}")));
+        }
+    }
+    // The main worktree's git directory, then each linked one's.
+    let mut git_dirs = vec![dir.to_path_buf()];
+    let linked = dir.join("worktrees");
+    match std::fs::read_dir(&linked) {
+        Ok(entries) => {
+            for entry in entries {
+                git_dirs.push(entry.map_err(|e| unreadable(&linked, e))?.path());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(unreadable(&linked, error)),
+    }
+    let short = full_ref.strip_prefix("refs/heads/").unwrap_or(full_ref);
+    for git_dir in git_dirs {
+        for (file, operation) in [
+            ("rebase-merge/head-name", "a rebase"),
+            ("rebase-apply/head-name", "a rebase"),
+            ("rebase-merge/update-refs", "a rebase"),
+            ("BISECT_START", "a bisect"),
+        ] {
+            let path = git_dir.join(file);
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(unreadable(&path, error)),
+            };
+            if text
+                .lines()
+                .map(str::trim)
+                .any(|line| line == full_ref || line == short)
+            {
+                return Ok(Some(format!(
+                    "in use by {operation} ({})",
+                    git_dir.display()
+                )));
+            }
         }
     }
     Ok(None)
+}
+
+fn unreadable(path: &Path, error: std::io::Error) -> MergeQueueError {
+    MergeQueueError::Git(format!("{}: {error}", path.display()))
 }
 
 /// Compare-and-swap `full_ref` from `expected_old` to `new`. `Ok(Err(why))`

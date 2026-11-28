@@ -5,7 +5,7 @@
 
 use mast_engine::build_jobs::{
     BuildJobs, BuildJobsConfig, DiskProbe, Executor, ExitRecord, HostProfile, Job, ListFilter,
-    Probe, StartCtx, StartError, Started, StopError,
+    NewJob, Probe, StartCtx, StartError, Started, StopError,
 };
 use mast_engine::merge_queue::{
     BuildOwner, BuildSpec, DocDelta, LandRequest, LandState, MergeQueue, NewLandRequest,
@@ -537,5 +537,345 @@ fn a_checked_out_target_is_not_moved_until_it_is_free() {
         Some(git(&f.repo, &["rev-parse", "main"])),
         landed.candidate_sha
     );
+    f.assert_clean();
+}
+
+/// Whatever the exit status.
+fn try_git(dir: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .current_dir(dir)
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(args)
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+/// Put the row back to what it was between the enqueue and the store write.
+fn forget_the_enqueue(f: &Fixture, id: &str) {
+    let db = rusqlite::Connection::open(f.root.join("queue/merge-queue.sqlite3")).unwrap();
+    let changed = db
+        .execute(
+            "UPDATE requests SET state='queued',
+               data=json_set(data, '$.state', 'queued', '$.buildJobId', NULL) WHERE id=?1",
+            [id],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+#[test]
+fn a_crash_after_the_enqueue_finds_the_same_build() {
+    let mut f = Fixture::new(&[]);
+    let sha = f.branch("one", &[("one.txt", "1\n")]);
+    let request = f.queue.submit(f.request("item-1", &sha, None)).unwrap();
+    f.queue.tick();
+    let before = f.state(&request);
+    assert_eq!(before.state, LandState::Building);
+    forget_the_enqueue(&f, &request.id);
+
+    let (builds, queue) = open(&f.root, &f.builder);
+    f.builds = builds;
+    f.queue = queue;
+    f.queue.tick();
+    let after = f.state(&request);
+    assert_eq!(after.state, LandState::Building, "{:?}", after.reason);
+    assert_eq!(after.candidate_sha, before.candidate_sha);
+    assert_eq!(after.build_job_id, before.build_job_id);
+    assert_eq!(f.builds.list(&ListFilter::default()).unwrap().len(), 1);
+    f.queue.cancel(&request.id, "done").unwrap();
+    f.assert_clean();
+}
+
+#[test]
+fn an_outdated_build_stops_before_its_folder_is_used_again() {
+    let f = Fixture::new(&[]);
+    git(&f.repo, &["update-ref", LEAD_REF, &f.base]);
+    let sha = f.branch("one", &[("one.txt", "1\n")]);
+    let other = f.branch("other", &[("other.txt", "2\n")]);
+    let request = f.queue.submit(f.request("item-1", &sha, None)).unwrap();
+    f.queue.tick();
+    f.builds.tick();
+    let before = f.state(&request);
+    let old_job = before.build_job_id.clone().unwrap();
+    let scratch = f.builder.trees.lock().unwrap()[0].0.clone();
+    forget_the_enqueue(&f, &request.id);
+    git(&f.repo, &["update-ref", LEAD_REF, &other]);
+
+    f.queue.tick();
+    let waiting = f.state(&request);
+    assert_eq!(waiting.state, LandState::Queued);
+    assert!(waiting.reason.unwrap().contains("outdated merge to stop"));
+    assert_eq!(waiting.candidate_sha, before.candidate_sha);
+    assert!(scratch.exists());
+    assert_eq!(f.builds.list(&ListFilter::default()).unwrap().len(), 1);
+
+    *f.builder.exit.lock().unwrap() = Some(1);
+    f.builds.tick();
+    assert!(f.builds.get(&old_job).unwrap().state.is_terminal());
+    *f.builder.exit.lock().unwrap() = None;
+    f.queue.tick();
+    let rebuilt = f.state(&request);
+    assert_eq!(rebuilt.state, LandState::Building, "{:?}", rebuilt.reason);
+    assert_ne!(rebuilt.candidate_sha, before.candidate_sha);
+    assert_ne!(rebuilt.build_job_id, Some(old_job));
+    f.queue.cancel(&request.id, "done").unwrap();
+    f.assert_clean();
+}
+
+#[test]
+fn a_cancelled_builds_folder_stays_until_the_build_ends() {
+    let f = Fixture::new(&[]);
+    let sha = f.branch("one", &[("one.txt", "1\n")]);
+    let request = f.queue.submit(f.request("item-1", &sha, None)).unwrap();
+    f.queue.tick();
+    f.builds.tick();
+    let scratch = f.builder.trees.lock().unwrap()[0].0.clone();
+    f.queue.cancel(&request.id, "withdrawn").unwrap();
+    f.queue.tick();
+    assert!(scratch.exists(), "the build may still be writing");
+    *f.builder.exit.lock().unwrap() = Some(1);
+    f.builds.tick();
+    f.queue.tick();
+    assert!(!scratch.exists());
+    f.assert_clean();
+}
+
+#[test]
+fn a_full_build_queue_is_retried_with_the_same_merge() {
+    let f = Fixture::new(&[]);
+    let fillers: Vec<String> = (0..4)
+        .map(|i| {
+            f.builds
+                .enqueue(NewJob {
+                    op_id: format!("filler-{i}"),
+                    chat_id: "chat".into(),
+                    space_id: "space".into(),
+                    device_id: "device".into(),
+                    worktree_key: format!("filler-{i}"),
+                    cwd: f.repo.to_string_lossy().into_owned(),
+                    argv: vec!["true".into(), i.to_string()],
+                    ..NewJob::default()
+                })
+                .unwrap()
+                .job
+                .id
+        })
+        .collect();
+    let sha = f.branch("one", &[("one.txt", "1\n")]);
+    let request = f.queue.submit(f.request("item-1", &sha, None)).unwrap();
+    f.queue.tick();
+    let held = f.state(&request);
+    assert_eq!(held.state, LandState::Queued);
+    assert!(held.reason.unwrap().contains("could not be queued"));
+    for id in fillers {
+        f.builds.cancel(&id, None).unwrap();
+    }
+    f.queue.tick();
+    let building = f.state(&request);
+    assert_eq!(building.state, LandState::Building, "{:?}", building.reason);
+    assert_eq!(building.candidate_sha, held.candidate_sha);
+    f.queue.cancel(&request.id, "done").unwrap();
+    f.assert_clean();
+}
+
+/// A request built, approved and ready to move `LEAD_REF`.
+fn ready_to_land(f: &Fixture) -> LandRequest {
+    git(&f.repo, &["update-ref", LEAD_REF, &f.base]);
+    let sha = f.branch("one", &[("one.txt", "1\n")]);
+    let request = f.queue.submit(f.request("item-1", &sha, None)).unwrap();
+    *f.builder.exit.lock().unwrap() = Some(0);
+    f.drive();
+    f.queue.record_verdict(&request.id, approve(&sha)).unwrap();
+    f.state(&request)
+}
+
+#[test]
+fn a_ref_moved_before_the_store_write_is_recorded_as_landed() {
+    let f = Fixture::new(&[]);
+    let ready = ready_to_land(&f);
+    let candidate = ready.candidate_sha.clone().unwrap();
+    git(&f.repo, &["update-ref", LEAD_REF, &candidate]);
+    // Even a cancel cannot deny what is already in the target.
+    let after = f.queue.cancel(&ready.id, "too late").unwrap();
+    assert_eq!(after.state, LandState::Landed);
+    assert_eq!(
+        f.queue.landed("item-1").unwrap().unwrap().landed_sha,
+        candidate
+    );
+    f.assert_clean();
+}
+
+#[test]
+fn a_refused_ref_update_waits_when_the_target_has_not_moved() {
+    let f = Fixture::new(&[]);
+    let ready = ready_to_land(&f);
+    let lock = f.repo.join(".git").join(format!("{LEAD_REF}.lock"));
+    std::fs::write(&lock, "").unwrap();
+    f.queue.tick();
+    let held = f.state(&ready);
+    assert_eq!((held.state, held.attempts), (LandState::AwaitingReview, 0));
+    assert!(held.reason.unwrap().contains("could not be updated"));
+    std::fs::remove_file(lock).unwrap();
+    f.queue.tick();
+    assert_eq!(f.state(&ready).state, LandState::Landed);
+    f.assert_clean();
+}
+
+#[test]
+fn a_branch_held_by_a_rebase_or_bisect_is_not_moved() {
+    let f = Fixture::new(&[]);
+    let lead = f.branch("lead-work", &[("a.txt", "lead\n")]);
+    f.branch("clash", &[("a.txt", "clash\n")]);
+    git(&f.repo, &["update-ref", LEAD_REF, &lead]);
+    let sha = f.branch("one", &[("one.txt", "1\n")]);
+    let request = f.queue.submit(f.request("item-1", &sha, None)).unwrap();
+    f.queue.record_verdict(&request.id, approve(&sha)).unwrap();
+    *f.builder.exit.lock().unwrap() = Some(0);
+
+    let other = f.root.join("user-worktree");
+    git(
+        &f.repo,
+        &["worktree", "add", "-q", other.to_str().unwrap(), LEAD],
+    );
+    assert!(!try_git(&other, &["rebase", "clash"]), "the rebase pauses");
+    let listing = git(&f.repo, &["worktree", "list", "--porcelain"]);
+    assert!(!listing.contains(LEAD_REF), "{listing}");
+    f.drive();
+    let held = f.state(&request);
+    assert_eq!(held.state, LandState::AwaitingReview, "{:?}", held.reason);
+    assert!(held.reason.unwrap().contains("rebase"));
+    assert_eq!(f.target(), Some(lead.clone()));
+
+    git(&other, &["rebase", "--abort"]);
+    git(&other, &["bisect", "start"]);
+    git(&other, &["checkout", "-q", "--detach"]);
+    f.drive();
+    assert!(f.state(&request).reason.unwrap().contains("bisect"));
+    assert_eq!(f.target(), Some(lead));
+
+    git(
+        &f.repo,
+        &["worktree", "remove", "--force", other.to_str().unwrap()],
+    );
+    f.drive();
+    let landed = f.state(&request);
+    assert_eq!(landed.state, LandState::Landed, "{:?}", landed.reason);
+    f.assert_clean();
+}
+
+#[test]
+fn a_conflict_that_appears_after_an_earlier_land_is_reported() {
+    let f = Fixture::new(&[]);
+    let one = f.branch("one", &[("a.txt", "first\n")]);
+    let two = f.branch("two", &[("a.txt", "second\n")]);
+    let first = f.queue.submit(f.request("item-1", &one, None)).unwrap();
+    let second = f.queue.submit(f.request("item-2", &two, None)).unwrap();
+    assert_eq!(second.state, LandState::Queued);
+    f.queue.record_verdict(&first.id, approve(&one)).unwrap();
+    *f.builder.exit.lock().unwrap() = Some(0);
+    f.drive();
+    assert_eq!(f.state(&first).state, LandState::Landed);
+    let late = f.state(&second);
+    assert_eq!(late.state, LandState::Conflicted, "{:?}", late.reason);
+    assert_eq!(
+        late.conflict_check.unwrap().paths,
+        vec!["a.txt".to_string()]
+    );
+    assert_eq!(f.target(), f.state(&first).candidate_sha);
+    f.assert_clean();
+}
+
+#[test]
+fn a_deleted_integration_branch_is_not_made_again() {
+    let f = Fixture::new(&[]);
+    let one = f.branch("one", &[("one.txt", "1\n")]);
+    let two = f.branch("two", &[("two.txt", "2\n")]);
+    let first = f.queue.submit(f.request("item-1", &one, None)).unwrap();
+    let second = f.queue.submit(f.request("item-2", &two, None)).unwrap();
+    f.queue.record_verdict(&first.id, approve(&one)).unwrap();
+    *f.builder.exit.lock().unwrap() = Some(0);
+    for _ in 0..6 {
+        if f.state(&first).state == LandState::Landed {
+            break;
+        }
+        // One step at a time, so the second request has not been merged yet.
+        let repo = first.repo.clone();
+        f.queue.step(&repo, LEAD_REF).unwrap();
+        f.builds.tick();
+        f.builds.tick();
+    }
+    assert_eq!(f.state(&first).state, LandState::Landed);
+    git(&f.repo, &["update-ref", "-d", LEAD_REF]);
+    f.drive();
+    let failed = f.state(&second);
+    assert_eq!(failed.state, LandState::Failed, "{:?}", failed.reason);
+    assert!(failed.reason.unwrap().contains("was deleted"));
+    assert_eq!(f.target(), None);
+    assert!(f.queue.submit(f.request("item-2", &two, None)).is_err());
+    f.assert_clean();
+}
+
+#[test]
+fn a_repeat_submit_with_other_inputs_is_refused() {
+    let f = Fixture::new(&[]);
+    let sha = f.branch("one", &[("one.txt", "1\n")]);
+    let request = f.queue.submit(f.request("item-1", &sha, None)).unwrap();
+    let same = f.queue.submit(f.request("item-1", &sha, None)).unwrap();
+    assert_eq!(same.id, request.id);
+    let error = f
+        .queue
+        .submit(f.request("item-1", &sha, Some("New words")))
+        .unwrap_err();
+    assert!(error.to_string().contains("different inputs"), "{error}");
+    let mut other_build = f.request("item-1", &sha, None);
+    other_build.build.argv = vec!["false".into()];
+    assert!(f.queue.submit(other_build).is_err());
+    assert_eq!(f.queue.list().unwrap().len(), 1);
+}
+
+#[test]
+fn a_lane_whose_repository_is_gone_can_be_forced_free() {
+    let f = Fixture::new(&[]);
+    let ready = ready_to_land(&f);
+    std::fs::rename(&f.repo, f.repo.with_file_name("moved")).unwrap();
+    f.queue.tick();
+    assert_eq!(f.state(&ready).state, LandState::AwaitingReview);
+    assert!(f.queue.cancel(&ready.id, "stuck").is_err());
+    let forced = f.queue.force_cancel(&ready.id, "stuck").unwrap();
+    assert_eq!(forced.state, LandState::Cancelled);
+    let reason = forced.reason.unwrap();
+    assert!(reason.contains("landing status unverifiable"), "{reason}");
+}
+
+#[test]
+fn two_lands_of_one_item_keep_both_entries() {
+    let f = Fixture::new(&[]);
+    let one = f.branch("one", &[("one.txt", "1\n")]);
+    let two = f.branch("two", &[("two.txt", "2\n")]);
+    *f.builder.exit.lock().unwrap() = Some(0);
+    for (sha, entry) in [(&one, "The feature."), (&two, "A follow-up.")] {
+        let request = f
+            .queue
+            .submit(f.request("item-1", sha, Some(entry)))
+            .unwrap();
+        f.queue.record_verdict(&request.id, approve(sha)).unwrap();
+        f.drive();
+        assert_eq!(f.state(&request).state, LandState::Landed);
+    }
+    let head = f.target().unwrap();
+    assert_eq!(
+        f.show(&format!("{head}:docs/changelog.d/item-1.md")),
+        "- The feature.\n- A follow-up."
+    );
+    assert_eq!(f.queue.landings("item-1").unwrap().len(), 2);
     f.assert_clean();
 }

@@ -7,8 +7,10 @@
 //!    tested commit against the current target. It touches no worktree.
 //! 2. **Prepare**: merge the tested commit onto the target in a scratch
 //!    worktree the queue owns, fold the changelog fragment into that same merge
-//!    commit ([`changelog`]), and enqueue the build through
-//!    [`BuildJobs::enqueue`]. The commit that is built is the commit that lands.
+//!    commit ([`changelog`]), save the commit on the request, and enqueue the
+//!    build through [`BuildJobs::enqueue`] under an operation id derived from
+//!    it, so a crash never leaves a second, untracked build. The commit that is
+//!    built is the commit that lands.
 //! 3. **Build**: wait for the job to reach a terminal state.
 //! 4. **Review**: wait for an approving [`ReviewVerdict`].
 //! 5. **Land**: `git update-ref <target> <candidate> <expected old>`. If the
@@ -17,7 +19,9 @@
 //!
 //! A failed step leaves the target ref untouched and records why on the
 //! request. The queue refuses to move a ref that is checked out in any
-//! worktree (it would leave that checkout stale) and waits until it is free.
+//! worktree, including one paused in a rebase or bisect (it would leave that
+//! checkout stale), and waits until it is free. A checkout made between that
+//! check and the ref update is not detected.
 //!
 //! The pipeline is a state machine: [`MergeQueue::tick`] makes whatever
 //! progress is possible and returns; it never sleeps. Calls block on git and
@@ -50,6 +54,7 @@ const MAX_DOC_DELTAS: usize = 32;
 const MAX_NOTE_BYTES: usize = 4096;
 /// Transitions one lane may make in one [`MergeQueue::tick`].
 const MAX_STEPS_PER_TICK: usize = 8;
+const SCRATCH_DIR: &str = "merge-queue-worktrees";
 const REF_PREFIX: &str = "refs/mast/merge-queue";
 
 #[derive(Debug, thiserror::Error)]
@@ -202,6 +207,9 @@ pub struct LandRequest {
     pub doc_deltas: Vec<DocDelta>,
     pub build: BuildSpec,
     pub owner: BuildOwner,
+    /// The target ref has been seen to exist, so it is never created again.
+    #[serde(default)]
+    pub target_existed: bool,
     pub state: LandState,
     /// Why the request ended, was requeued, or is waiting.
     pub reason: Option<String>,
@@ -391,9 +399,23 @@ impl MergeQueue {
                 LandState::Conflicted | LandState::Failed | LandState::Cancelled
             )
         {
+            let same = existing.project_id == new.project_id
+                && existing.branch == new.branch
+                && existing.base_ref == new.base_ref
+                && existing.changelog_fragment == fragment
+                && existing.doc_deltas == new.doc_deltas
+                && existing.build == new.build;
+            if !same {
+                return Err(invalid(format!(
+                    "land request {} ({}) already covers this commit with different inputs",
+                    existing.id,
+                    existing.state.as_str()
+                )));
+            }
             return Ok(existing);
         }
-        let (target_sha, _) = current_target(&repo, &target_ref, &new.base_ref)?;
+        let existed = self.inner.store.has_landed(&repo_key, &target_ref)?;
+        let (target_sha, creates) = current_target(&repo, &target_ref, &new.base_ref, existed)?;
         let check = ConflictCheck {
             paths: git::merge_tree_conflicts(&repo, &target_sha, &tested)?,
             target_sha,
@@ -413,6 +435,7 @@ impl MergeQueue {
             doc_deltas: new.doc_deltas,
             build: new.build,
             owner: new.owner,
+            target_existed: !creates,
             state: if check.is_clean() {
                 LandState::Queued
             } else {
@@ -516,7 +539,7 @@ impl MergeQueue {
         if approved {
             self.save(&mut request)?;
         } else {
-            self.cancel_build(&request);
+            self.cancel_build(&mut request);
             self.finish(
                 &mut request,
                 LandState::Rejected,
@@ -526,7 +549,8 @@ impl MergeQueue {
         Ok(request)
     }
 
-    /// Withdraw an unfinished request, freeing its lane.
+    /// Withdraw an unfinished request, freeing its lane. A request whose merge
+    /// commit is already in the target is recorded as landed instead.
     pub fn cancel(&self, id: &str, reason: &str) -> Result<LandRequest, MergeQueueError> {
         let _changes = self.changes();
         let mut request = self.open_request(id)?;
@@ -534,7 +558,7 @@ impl MergeQueue {
         if self.recover_landed(&mut request)? {
             return Ok(request);
         }
-        self.cancel_build(&request);
+        self.cancel_build(&mut request);
         self.finish(
             &mut request,
             LandState::Cancelled,
@@ -543,8 +567,29 @@ impl MergeQueue {
         Ok(request)
     }
 
+    /// [`Self::cancel`] for a lane that is stuck because the repository cannot
+    /// be read (moved or deleted). When whether the change landed cannot be
+    /// checked, the request is cancelled and its reason says so.
+    pub fn force_cancel(&self, id: &str, reason: &str) -> Result<LandRequest, MergeQueueError> {
+        let _changes = self.changes();
+        let mut request = self.open_request(id)?;
+        let reason = match self.recover_landed(&mut request) {
+            Ok(true) => return Ok(request),
+            Ok(false) => reason.to_owned(),
+            Err(error) => format!("landing status unverifiable ({error}); {reason}"),
+        };
+        self.cancel_build(&mut request);
+        self.finish(
+            &mut request,
+            LandState::Cancelled,
+            cut(&reason, MAX_NOTE_BYTES),
+        )?;
+        Ok(request)
+    }
+
     /// Advance every lane as far as it can go now.
     pub fn tick(&self) -> Vec<StepOutcome> {
+        self.sweep_worktrees();
         let lanes = match self.inner.store.open_lanes() {
             Ok(lanes) => lanes,
             Err(error) => {
@@ -669,61 +714,174 @@ impl MergeQueue {
         self.remove_worktree(request);
         request.state = LandState::Queued;
         request.reason = Some(why);
-        request.candidate_sha = None;
-        request.expected_target = None;
-        request.creates_target = false;
-        request.build_job_id = None;
+        forget_candidate(request);
         self.save(request)?;
         Ok(Self::advanced(request))
     }
 
     fn scratch_path(&self, request: &LandRequest) -> PathBuf {
-        self.inner
-            .root
-            .join("merge-queue-worktrees")
-            .join(&request.id)
+        self.inner.root.join(SCRATCH_DIR).join(&request.id)
     }
 
+    /// Remove a request's scratch worktree and only its registration.
     fn remove_worktree(&self, request: &LandRequest) {
         let path = self.scratch_path(request);
-        if !path.exists() {
-            return;
-        }
         let repo = Path::new(&request.repo);
         let path_text = path.to_string_lossy();
-        if let Err(error) = git::run(repo, &["worktree", "remove", "--force", &path_text]) {
+        let remove = ["worktree", "remove", "--force", &path_text];
+        let removed = git::run(repo, &remove);
+        if let Err(error) = removed
+            && path.exists()
+        {
             tracing::warn!(%error, "merge queue: removing a scratch worktree by hand");
             // The path is the queue's own, under its root.
             if let Err(error) = std::fs::remove_dir_all(&path) {
                 tracing::warn!(%error, "merge queue: scratch worktree left behind");
             }
-            let _ = git::run(repo, &["worktree", "prune"]);
+            // With the folder gone this drops just this registration.
+            let _ = git::run(repo, &remove);
+        }
+    }
+
+    /// Whether the request's build can no longer write to its worktree.
+    fn build_ended(&self, request: &LandRequest) -> bool {
+        let Some(job_id) = &request.build_job_id else {
+            return true;
+        };
+        match self.inner.builds.get(job_id) {
+            Ok(job) => job.state.is_terminal(),
+            Err(BuildJobError::NotFound(_)) => true,
+            Err(_) => false,
+        }
+    }
+
+    /// Remove the worktrees of ended requests whose cancelled build has now
+    /// stopped.
+    fn sweep_worktrees(&self) {
+        let Ok(entries) = std::fs::read_dir(self.inner.root.join(SCRATCH_DIR)) else {
+            return;
+        };
+        let _changes = self.changes();
+        for entry in entries.flatten() {
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if let Ok(Some(request)) = self.inner.store.get(&id)
+                && request.state.is_terminal()
+                && self.build_ended(&request)
+            {
+                self.remove_worktree(&request);
+            }
         }
     }
 
     fn clean_up(&self, request: &LandRequest) {
-        self.remove_worktree(request);
+        // A build asked to stop may still be writing; the sweep comes back.
+        if self.build_ended(request) {
+            self.remove_worktree(request);
+        }
         let repo = Path::new(&request.repo);
         for name in ["tested", "candidate"] {
             let _ = git::run(repo, &["update-ref", "-d", &pin(&request.id, name)]);
         }
     }
 
-    fn cancel_build(&self, request: &LandRequest) {
+    /// The build of the request's merge commit. Replaying the same operation
+    /// returns the same job.
+    fn build_job(&self, request: &LandRequest, candidate: &str) -> NewJob {
+        let worktree = self.scratch_path(request).to_string_lossy().into_owned();
+        NewJob {
+            op_id: format!("merge-queue:{}:{candidate}", request.id),
+            chat_id: request.owner.chat_id.clone(),
+            space_id: request.owner.space_id.clone(),
+            device_id: request.owner.device_id.clone(),
+            worktree_key: worktree.clone(),
+            cwd: worktree,
+            branch: Some(request.target_ref.clone()),
+            head_sha: Some(candidate.to_owned()),
+            argv: request.build.argv.clone(),
+            label: Some(format!("merge queue: {}", request.work_item_id)),
+            // The queue polls the job itself.
+            wake: false,
+            timeout_secs: request.build.timeout_secs,
+            integration: true,
+            awaiting_approval: request.build.awaiting_approval,
+            ..NewJob::default()
+        }
+    }
+
+    /// Learn the id of a build that may have been enqueued just before a crash,
+    /// by replaying its operation. If none had been, the replay makes one, which
+    /// the caller then cancels. An error means it is unknown whether one exists.
+    fn adopt_job(&self, request: &mut LandRequest) -> Result<(), BuildJobError> {
+        if request.state != LandState::Queued || request.build_job_id.is_some() {
+            return Ok(());
+        }
+        let Some(candidate) = request.candidate_sha.clone() else {
+            return Ok(());
+        };
+        match self
+            .inner
+            .builds
+            .enqueue(self.build_job(request, &candidate))
+        {
+            Ok(enqueued) => {
+                request.build_job_id = Some(enqueued.job.id);
+                Ok(())
+            }
+            // A replay is answered before the limits, so no job exists.
+            Err(BuildJobError::Limit(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn cancel_build(&self, request: &mut LandRequest) {
+        if let Err(error) = self.adopt_job(request) {
+            tracing::warn!(%error, "merge queue: could not look for an earlier build");
+        }
         let Some(job_id) = &request.build_job_id else {
             return;
         };
-        let running = self
-            .inner
-            .builds
-            .get(job_id)
-            .is_ok_and(|job| !job.state.is_terminal());
-        if running && let Err(error) = self.inner.builds.cancel(job_id, None) {
+        if !self.build_ended(request)
+            && let Err(error) = self.inner.builds.cancel(job_id, None)
+        {
             tracing::warn!(%error, job = %job_id, "merge queue: could not cancel a build");
         }
     }
 
     fn prepare(&self, request: &mut LandRequest) -> Result<StepOutcome, MergeQueueError> {
+        // A merge commit saved by an earlier try (a full build queue, or a
+        // crash around the enqueue) is used again while the target is where it
+        // was.
+        if let Some(candidate) = request.candidate_sha.clone() {
+            let repo = PathBuf::from(&request.repo);
+            let current = self.target_for(&repo, request);
+            let unmoved = matches!(
+                &current,
+                Ok((head, creates)) if Some(head) == request.expected_target.as_ref()
+                    && *creates == request.creates_target
+            );
+            if unmoved {
+                if let Err(error) = self.ensure_worktree(request, &candidate) {
+                    self.cancel_build(request);
+                    let reason = format!("could not restore the merge: {error}");
+                    return self.finish(request, LandState::Failed, reason);
+                }
+                return self.enqueue_build(request, &candidate);
+            }
+            // The old build must have stopped before its folder is used again.
+            if let Err(error) = self.adopt_job(request) {
+                return self.wait(request, format!("an earlier build is unknown: {error}"));
+            }
+            self.cancel_build(request);
+            if !self.build_ended(request) {
+                return self.wait(
+                    request,
+                    "waiting for the build of an outdated merge to stop".into(),
+                );
+            }
+            self.remove_worktree(request);
+            forget_candidate(request);
+            self.save(request)?;
+        }
         match self.merge_candidate(request) {
             Ok(None) => {}
             Ok(Some((state, reason))) => return self.finish(request, state, reason),
@@ -736,26 +894,21 @@ impl MergeQueue {
             .candidate_sha
             .clone()
             .ok_or_else(|| invalid("the merge produced no commit"))?;
-        let worktree = self.scratch_path(request).to_string_lossy().into_owned();
-        let job = NewJob {
-            op_id: format!("merge-queue:{}:{candidate}", request.id),
-            chat_id: request.owner.chat_id.clone(),
-            space_id: request.owner.space_id.clone(),
-            device_id: request.owner.device_id.clone(),
-            worktree_key: worktree.clone(),
-            cwd: worktree,
-            branch: Some(request.target_ref.clone()),
-            head_sha: Some(candidate),
-            argv: request.build.argv.clone(),
-            label: Some(format!("merge queue: {}", request.work_item_id)),
-            // The queue polls the job itself.
-            wake: false,
-            timeout_secs: request.build.timeout_secs,
-            integration: true,
-            awaiting_approval: request.build.awaiting_approval,
-            ..NewJob::default()
-        };
-        match self.inner.builds.enqueue(job) {
+        // Saved before the enqueue, so a crash after it finds the same job.
+        self.save(request)?;
+        self.enqueue_build(request, &candidate)
+    }
+
+    fn enqueue_build(
+        &self,
+        request: &mut LandRequest,
+        candidate: &str,
+    ) -> Result<StepOutcome, MergeQueueError> {
+        match self
+            .inner
+            .builds
+            .enqueue(self.build_job(request, candidate))
+        {
             Ok(enqueued) => {
                 request.build_job_id = Some(enqueued.job.id);
                 request.state = LandState::Building;
@@ -765,9 +918,6 @@ impl MergeQueue {
             }
             // The queue is full or its store is unwell: try again later.
             Err(error @ (BuildJobError::Limit(_) | BuildJobError::Store(_))) => {
-                self.remove_worktree(request);
-                request.candidate_sha = None;
-                request.expected_target = None;
                 self.wait(request, format!("the build could not be queued: {error}"))
             }
             Err(error) => {
@@ -777,6 +927,47 @@ impl MergeQueue {
         }
     }
 
+    fn target_for(
+        &self,
+        repo: &Path,
+        request: &LandRequest,
+    ) -> Result<(String, bool), MergeQueueError> {
+        let existed = request.target_existed
+            || self
+                .inner
+                .store
+                .has_landed(&request.repo, &request.target_ref)?;
+        current_target(repo, &request.target_ref, &request.base_ref, existed)
+    }
+
+    /// The scratch worktree at `candidate`, made again if it is gone.
+    fn ensure_worktree(
+        &self,
+        request: &LandRequest,
+        candidate: &str,
+    ) -> Result<(), MergeQueueError> {
+        let path = self.scratch_path(request);
+        if path.exists() && git::commit_id(&path, "HEAD")?.as_deref() == Some(candidate) {
+            return Ok(());
+        }
+        self.remove_worktree(request);
+        self.add_worktree(request, candidate)
+    }
+
+    fn add_worktree(&self, request: &LandRequest, commit: &str) -> Result<(), MergeQueueError> {
+        let worktree = self.scratch_path(request);
+        if let Some(parent) = worktree.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| MergeQueueError::Git(e.to_string()))?;
+        }
+        let worktree = worktree.to_string_lossy();
+        // `--force`: a crash can leave the path registered with its folder gone.
+        git::run(
+            Path::new(&request.repo),
+            &["worktree", "add", "--force", "--detach", &worktree, commit],
+        )?;
+        Ok(())
+    }
+
     /// Make the merge commit in a fresh scratch worktree and note it on the
     /// request. `Some` is a reason the request cannot land.
     fn merge_candidate(
@@ -784,7 +975,8 @@ impl MergeQueue {
         request: &mut LandRequest,
     ) -> Result<Option<(LandState, String)>, MergeQueueError> {
         let repo = PathBuf::from(&request.repo);
-        let (target, creates) = current_target(&repo, &request.target_ref, &request.base_ref)?;
+        let (target, creates) = self.target_for(&repo, request)?;
+        request.target_existed |= !creates;
         let paths = git::merge_tree_conflicts(&repo, &target, &request.tested_sha)?;
         let conflicted = !paths.is_empty();
         let reason = conflicted.then(|| conflict_reason(&paths));
@@ -803,23 +995,8 @@ impl MergeQueue {
         }
         // A crash may have left an earlier attempt's worktree behind.
         self.remove_worktree(request);
+        self.add_worktree(request, &target)?;
         let worktree = self.scratch_path(request);
-        if let Some(parent) = worktree.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| MergeQueueError::Git(e.to_string()))?;
-        }
-        let worktree_text = worktree.to_string_lossy().into_owned();
-        // `--force`: a crash can leave the path registered with its folder gone.
-        git::run(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--force",
-                "--detach",
-                &worktree_text,
-                &target,
-            ],
-        )?;
         let merge = git::output(
             &worktree,
             &["merge", "--no-ff", "--no-commit", &request.tested_sha],
@@ -967,15 +1144,17 @@ impl MergeQueue {
             );
         };
         let repo = PathBuf::from(&request.repo);
-        if let Some(worktree) = git::checked_out_at(&repo, &request.target_ref)? {
+        if let Some(user) = git::branch_in_use(&repo, &request.target_ref)? {
             let reason = format!(
-                "{} is checked out at {worktree}; moving it would leave that worktree stale",
+                "{} is {user}; moving it would leave that worktree stale",
                 request.target_ref
             );
             return self.wait(request, reason);
         }
+        // All zeros, as long as this repository's ids: "must not exist yet".
+        let absent = "0".repeat(candidate.len());
         let old = if request.creates_target {
-            git::ZERO_OID
+            &absent
         } else {
             &expected
         };
@@ -1011,15 +1190,29 @@ fn pin(request_id: &str, name: &str) -> String {
     format!("{REF_PREFIX}/{request_id}/{name}")
 }
 
+fn forget_candidate(request: &mut LandRequest) {
+    request.candidate_sha = None;
+    request.expected_target = None;
+    request.creates_target = false;
+    request.build_job_id = None;
+}
+
 /// The commit a land would build on, and whether the target ref has to be
-/// created. Only a `mast/int/...` branch may be created.
+/// created. Only a `mast/int/...` branch that never `existed` may be created:
+/// recreating a deleted one from a base could drop changes recorded as landed.
 fn current_target(
     repo: &Path,
     target_ref: &str,
     base_ref: &str,
+    existed: bool,
 ) -> Result<(String, bool), MergeQueueError> {
     if let Some(head) = git::commit_id(repo, target_ref)? {
         return Ok((head, false));
+    }
+    if existed {
+        return Err(invalid(format!(
+            "target ref {target_ref} was deleted; restore it before landing on it"
+        )));
     }
     if !target_ref.starts_with("refs/heads/mast/int/") {
         return Err(invalid(format!("target ref {target_ref} does not exist")));
