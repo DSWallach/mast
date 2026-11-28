@@ -594,7 +594,10 @@ impl Runner<'_> {
             return Ok(());
         }
         let path = self.out.join(name);
-        self.session().png(&path)?;
+        let Some(session) = self.session.as_mut() else {
+            return Err("the app is not running".into());
+        };
+        session.png(&path)?;
         self.report.artifacts.push(path.to_string_lossy().into_owned());
         Ok(())
     }
