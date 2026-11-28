@@ -857,7 +857,7 @@ impl SessionsEngine {
 
     /// Space `ApprovalRule` ids (comma-joined) that allow this command, if any.
     pub(crate) fn match_build_rule(&self, chat_id: &str, argv: &[String], cwd: &str) -> Option<String> {
-        self.inner.match_space_rule_for_command(chat_id, &serde_json::Value::String(shell_words::join(argv)), cwd)
+        self.inner.match_space_rule_for_command(chat_id, &serde_json::Value::String(shell_words::join(argv)), cwd, true)
     }
 
     pub(crate) fn record_build_rule_use(&self, chat_id: &str, rule_ids: &str, command: &str) {
@@ -3079,11 +3079,11 @@ impl Inner {
     fn match_space_approval_rule(&self, chat_id: &str, question: &UserInputQuestion) -> Option<String> {
         if !matches!(question.header.as_str(), "Approve command" | "Approve command (subagent)") || !question.options.starts_with(&["Yes".to_owned(), "No".to_owned()]) { return None; }
         let details = question.command_approval.as_ref()?;
-        self.match_space_rule_for_command(chat_id, &details.command, details.cwd.as_deref()?)
+        self.match_space_rule_for_command(chat_id, &details.command, details.cwd.as_deref()?, false)
     }
 
     /// Match a command against the Space's enabled `ApprovalRule`s; returns the matched rule ids.
-    pub(crate) fn match_space_rule_for_command(&self, chat_id: &str, command: &serde_json::Value, cwd: &str) -> Option<String> {
+    pub(crate) fn match_space_rule_for_command(&self, chat_id: &str, command: &serde_json::Value, cwd: &str, any_harness: bool) -> Option<String> {
         use mast_proto::work_outline::ApprovalRuleHarness;
         let ws = self.workspace()?;
         let chat = ws.chat(chat_id).ok()??;
@@ -3095,6 +3095,7 @@ impl Inner {
         let rule_harness = match harness_id {
             Some(HarnessId::Codex) => ApprovalRuleHarness::Codex,
             Some(HarnessId::ClaudeCode) => ApprovalRuleHarness::ClaudeCode,
+            _ if any_harness => ApprovalRuleHarness::Any,
             _ => return None,
         };
         let inputs = ws.work_outline_inputs(&space_id);
