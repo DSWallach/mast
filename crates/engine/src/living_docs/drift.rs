@@ -37,6 +37,9 @@ const NOT_TOOL_SUFFIXES: &[&str] = &["_", "_id", "_ids", "_at", "_ms", "_count",
 /// Server prefix under which agents see Mast's tools.
 const MCP_TOOL_PREFIX: &str = "mcp__mast-agent__";
 
+/// Directories whose contents are built or installed, not tracked.
+const GENERATED_DIRS: &[&str] = &["build", "target", "node_modules"];
+
 const FILE_EXTENSIONS: &[&str] = &[
     "rs", "md", "toml", "json", "ts", "tsx", "js", "mjs", "cjs", "py", "sh", "swift", "yml",
     "yaml", "css", "html", "sql", "txt", "lock", "plist", "service", "svg", "png", "jpg",
@@ -404,6 +407,13 @@ fn check_file(
         .filter_map(|candidate| tree.line_count(candidate))
         .collect();
     if lengths.is_empty() {
+        // Build output is absent from a clean tree without having drifted.
+        if path
+            .split('/')
+            .any(|segment| GENERATED_DIRS.contains(&segment))
+        {
+            return None;
+        }
         return Some((DriftKind::MissingFile, reference.to_owned()));
     }
     let line = line?;
@@ -557,7 +567,7 @@ Commands `mast`, `mast headless`, `mast mcp --peer NAME`, `mast daemon <command>
 `mast daemon install`, `mast --version`, `cargo test -p mast-engine`.
 Paths `src/main.rs`, `application/json`, `a/b.rs`, `~/.mast/settings.json`, `/etc/hosts.toml`,
 `docs/changelog.d/<id>.md`, `crates/*/Cargo.toml`, `crates/engine/src/{a,b}.rs`, `docs/.../x.md`,
-`.mast/artifacts/x.md`, `crates/engine/src/lib.rs::run`, `docs/changelog.d`, `crates/engine/`.
+`.mast/artifacts/x.md`, `docs/build/out.png`, [out](../target/report.md), `crates/engine/src/lib.rs::run`, `docs/changelog.d`, `crates/engine/`.
 Links [web](https://example.test/gone.md), [artifact](mast-artifact:abc), [anchor](#gone),
 [ok](internal/peer-link.md), [root](docs/internal/peer-link.md), [up](../README.md),
 [outside](../../elsewhere.md), [local](file:///tmp/gone.rs), `[in code](gone.md)`.

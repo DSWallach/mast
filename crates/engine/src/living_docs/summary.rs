@@ -4,7 +4,7 @@
 use mast_proto::project_document_inventory::{ResyncJob, ResyncStatus};
 use serde::{Deserialize, Serialize};
 
-use super::{DocDriftStatus, LivingDocRow};
+use super::{DocDriftStatus, DocLedgerSummary, LivingDocRow, needs_attention};
 
 /// Most bytes [`DocLedgerSummary::text`] takes.
 pub const MAX_SUMMARY_TEXT_BYTES: usize = 1536;
@@ -14,73 +14,52 @@ const TAIL_RESERVE: usize = 96;
 /// Bytes, so even four-byte characters cannot push the header past the cap.
 const MAX_FIELD_BYTES: usize = 128;
 
-/// The artifacts a successor must read the project against.
+/// The ledger snapshot and its bounded rendering.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-pub struct CanonicalPins {
-    pub spec_artifact_id: Option<String>,
-    pub spec_sha256: Option<String>,
-    pub primary_plan_id: Option<String>,
-    pub primary_plan_rev: Option<u32>,
-    pub matrix_artifact_id: Option<String>,
-    pub matrix_rev: Option<u32>,
-}
-
-/// One document still owed work.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct DocLedgerEntry {
-    pub doc_id: String,
-    pub drift_status: DocDriftStatus,
-    pub owed_since_commit: Option<String>,
-    pub pending_delta_count: usize,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct DocLedgerSummary {
-    pub pins: CanonicalPins,
-    /// Every row needing attention, most urgent first, then by `doc_id`.
-    pub rows: Vec<DocLedgerEntry>,
-    /// Set while a re-sync job is checking, awaiting review or applying.
-    pub resync_status: Option<ResyncStatus>,
+pub struct DocLedgerDigest {
+    /// `pending_rows` holds every row needing attention, most urgent first,
+    /// then by `doc_id`. `resync_job` is set only while a job is checking,
+    /// awaiting review or applying.
+    pub summary: DocLedgerSummary,
     /// Rows left out of `text` to keep it within the cap.
     pub omitted_from_text: usize,
     pub text: String,
 }
 
-/// Summarize the rows that are not fresh or have queued deltas.
+/// Summarize the rows that are not fresh or have queued deltas. `pins` carries
+/// the canonical pin fields; its rows and job are replaced.
 pub fn build_doc_ledger_summary(
-    pins: CanonicalPins,
+    pins: DocLedgerSummary,
     rows: &[LivingDocRow],
     resync_job: Option<&ResyncJob>,
-) -> DocLedgerSummary {
-    let mut entries: Vec<DocLedgerEntry> = rows
+) -> DocLedgerDigest {
+    let mut pending_rows: Vec<LivingDocRow> = rows
         .iter()
-        .filter(|row| row.needs_attention())
-        .map(|row| DocLedgerEntry {
-            doc_id: row.doc_id.clone(),
-            drift_status: row.drift_status,
-            owed_since_commit: row.owed_since_commit.clone(),
-            pending_delta_count: row.pending_deltas.len(),
-        })
+        .filter(|row| needs_attention(row))
+        .cloned()
         .collect();
-    entries.sort_by(|a, b| {
+    pending_rows.sort_by(|a, b| {
         urgency(a.drift_status)
             .cmp(&urgency(b.drift_status))
             .then_with(|| a.doc_id.cmp(&b.doc_id))
     });
-    let resync_status = resync_job.map(|job| job.status).filter(|status| {
-        matches!(
-            status,
-            ResyncStatus::Checking | ResyncStatus::ReadyForReview | ResyncStatus::Applying
-        )
-    });
-    let (text, omitted_from_text) = render(&pins, &entries, resync_status);
-    DocLedgerSummary {
-        pins,
-        rows: entries,
-        resync_status,
+    let resync_job = resync_job
+        .filter(|job| {
+            matches!(
+                job.status,
+                ResyncStatus::Checking | ResyncStatus::ReadyForReview | ResyncStatus::Applying
+            )
+        })
+        .cloned();
+    let summary = DocLedgerSummary {
+        pending_rows,
+        resync_job,
+        ..pins
+    };
+    let (text, omitted_from_text) = render(&summary);
+    DocLedgerDigest {
+        summary,
         omitted_from_text,
         text,
     }
@@ -95,11 +74,8 @@ fn urgency(status: DocDriftStatus) -> u8 {
     }
 }
 
-fn render(
-    pins: &CanonicalPins,
-    rows: &[DocLedgerEntry],
-    resync: Option<ResyncStatus>,
-) -> (String, usize) {
+fn render(pins: &DocLedgerSummary) -> (String, usize) {
+    let rows = &pins.pending_rows;
     let mut text = String::from("Documentation ledger\n");
     let revision = |rev: Option<u32>| rev.map(|rev| format!(" rev {rev}")).unwrap_or_default();
     if let Some(id) = &pins.spec_artifact_id {
@@ -124,7 +100,7 @@ fn render(
             revision(pins.matrix_rev)
         ));
     }
-    if let Some(status) = resync {
+    if let Some(status) = pins.resync_job.as_ref().map(|job| job.status) {
         let status = match status {
             ResyncStatus::Checking => "checking",
             ResyncStatus::ReadyForReview => "ready for review",
@@ -149,8 +125,8 @@ fn render(
             let short: String = field(commit).chars().take(10).collect();
             line.push_str(&format!(" since {short}"));
         }
-        if row.pending_delta_count > 0 {
-            line.push_str(&format!(" ({} pending deltas)", row.pending_delta_count));
+        if !row.pending_deltas.is_empty() {
+            line.push_str(&format!(" ({} pending deltas)", row.pending_deltas.len()));
         }
         line.push('\n');
         let reserve = if index + 1 == rows.len() {
@@ -196,14 +172,15 @@ mod tests {
         }
     }
 
-    fn pins() -> CanonicalPins {
-        CanonicalPins {
+    fn pins() -> DocLedgerSummary {
+        DocLedgerSummary {
             spec_artifact_id: Some("spec".into()),
             spec_sha256: Some("ab".repeat(32)),
             primary_plan_id: Some("plan".into()),
             primary_plan_rev: Some(4),
             matrix_artifact_id: Some("matrix".into()),
             matrix_rev: Some(2),
+            ..Default::default()
         }
     }
 
@@ -221,7 +198,12 @@ mod tests {
         let first = build_doc_ledger_summary(pins(), &rows, None);
         rows.reverse();
         assert_eq!(build_doc_ledger_summary(pins(), &rows, None), first);
-        let ids: Vec<&str> = first.rows.iter().map(|r| r.doc_id.as_str()).collect();
+        let ids: Vec<&str> = first
+            .summary
+            .pending_rows
+            .iter()
+            .map(|r| r.doc_id.as_str())
+            .collect();
         assert_eq!(ids, ["repo:z.md", "repo:a.md", "repo:b.md", "repo:q.md"]);
         assert!(!first.text.contains("fresh.md"));
         assert!(first.text.contains("Plan: artifact:plan rev 4"));
@@ -253,7 +235,7 @@ mod tests {
                 "{}",
                 summary.text.len()
             );
-            assert_eq!(summary.rows.len(), 200);
+            assert_eq!(summary.summary.pending_rows.len(), 200);
             let listed = summary
                 .text
                 .lines()
@@ -275,6 +257,6 @@ mod tests {
         assert!(summary.text.contains("Re-sync: ready for review"));
         assert!(summary.text.contains("All tracked documents are fresh."));
         let summary = build_doc_ledger_summary(pins(), &[], Some(&job(ResyncStatus::Applied)));
-        assert_eq!(summary.resync_status, None);
+        assert_eq!(summary.summary.resync_job, None);
     }
 }
