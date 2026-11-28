@@ -88,7 +88,7 @@ impl Cap {
             }
             Cap::Hard => "Balanced failover gives a provider no new work that would pass this.",
             Cap::Freeze => {
-                "Pinned freeze stops before new work would pass this, or a provider's own hard cap if you set one."
+                "Pinned freeze stops before new work would pass this. A provider with its own hard cap stops there instead."
             }
         }
     }
