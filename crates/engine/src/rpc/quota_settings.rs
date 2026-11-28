@@ -22,3 +22,15 @@ pub(super) fn handle(
     }
     RpcReply::value(&quota_settings::load(store_root))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_methods_follow_target_device_id() {
+        for method in [methods::GET_QUOTA_SETTINGS, methods::SET_QUOTA_SETTINGS] {
+            assert!(super::super::forwardable(method), "{method}");
+        }
+    }
+}

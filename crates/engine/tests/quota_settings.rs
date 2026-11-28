@@ -41,7 +41,8 @@ async fn quota_settings_rpc_defaults_saves_and_rejects_bad_caps() {
     let saved = client
         .call(
             methods::SET_QUOTA_SETTINGS,
-            json!({"policy":"pinnedFreeze","softCap":0.6,"hardCap":0.7,"freezeCap":0.8,"later":true}),
+            json!({"policy":"pinnedFreeze","softCap":0.6,"hardCap":0.7,"freezeCap":0.8,"later":true,
+                "targetDeviceId":core.workspace.device_id()}),
         )
         .await
         .unwrap();
