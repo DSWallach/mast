@@ -550,7 +550,10 @@ impl AccountsPage {
         }
     }
 
+    /// Returning to the page: it is kept between visits, so re-read what other
+    /// clients may have changed.
     pub(crate) fn refresh_managed_accounts(&mut self, cx: &mut Context<Self>) {
+        self.quota.update(cx, |quota, cx| quota.refresh(cx));
         self.load_managed(false, cx);
     }
 
@@ -1843,6 +1846,37 @@ impl Render for AccountsPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn quota_caps_follow_the_page_device_and_reload_on_return(cx: &mut gpui::TestAppContext) {
+        use std::sync::{Arc, Mutex};
+        let targets: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+        let seen = targets.clone();
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("here".into());
+            state.accounts_rpc_override = Some(Arc::new(move |method, params| {
+                if method != methods::GET_QUOTA_SETTINGS {
+                    return Err("fixture".into());
+                }
+                let target = params.get("targetDeviceId").and_then(|id| id.as_str());
+                seen.lock().unwrap().push(target.map(str::to_string));
+                Ok(serde_json::to_value(mast_engine::quota_settings::QuotaSettings::default())
+                    .unwrap())
+            }));
+            state
+        });
+        let page = cx.new(|cx| AccountsPage::new(state, cx));
+        cx.run_until_parked();
+        page.update(cx, |page, cx| {
+            page.set_target_device(Some("there".into()), cx)
+        });
+        cx.run_until_parked();
+        page.update(cx, |page, cx| page.refresh_managed_accounts(cx));
+        cx.run_until_parked();
+        let there = Some("there".to_string());
+        assert_eq!(*targets.lock().unwrap(), [None, there.clone(), there]);
+    }
     use chrono::TimeDelta;
 
     #[test]

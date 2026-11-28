@@ -2,8 +2,10 @@
 //! and freeze caps of the device picked in the Accounts page's device
 //! switcher (`GetQuotaSettings` / `SetQuotaSettings`).
 //!
-//! Edits stay in a draft of whole percents until Save, which is disabled while
-//! the draft is invalid or unchanged. No dispatch path reads the caps yet, and
+//! Edits stay in a draft until Save, which is disabled while the draft is
+//! invalid or unchanged. Steppers move in whole percents, but a cap the user
+//! has not moved keeps its saved value exactly, even one that is fractional or
+//! outside what the steppers offer. No dispatch path reads the caps yet, and
 //! the section's copy says so.
 
 use gpui::{AnyElement, Context, Entity, SharedString, Task, Window, div, prelude::*, px};
@@ -38,7 +40,7 @@ impl Cap {
     pub const ALL: [Cap; 3] = [Cap::Soft, Cap::Hard, Cap::Freeze];
 
     /// What a stepper can reach. Ordering between the caps is not clamped: it
-    /// is reported by [`CapDraft::error`] so one cap can pass through another's
+    /// is reported by [`CapEditor::error`] so one cap can pass through another's
     /// value while the user rearranges them.
     pub fn range(self) -> (u8, u8) {
         match self {
@@ -87,15 +89,6 @@ pub const MODES: [(ProviderQuotaPolicy, &str, &str); 2] = [
     ),
 ];
 
-/// The settings as the controls show them: caps in whole percents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CapDraft {
-    pub policy: ProviderQuotaPolicy,
-    pub soft: u8,
-    pub hard: u8,
-    pub freeze: u8,
-}
-
 fn percent(fraction: f32) -> u8 {
     (fraction * 100.0).round().clamp(0.0, 100.0) as u8
 }
@@ -104,84 +97,96 @@ fn fraction(percent: u8) -> f32 {
     f32::from(percent) / 100.0
 }
 
-impl CapDraft {
-    pub fn from_settings(settings: &QuotaSettings) -> Self {
+/// A cap as the page shows it: whole percents, with one decimal only for a
+/// saved value that has one.
+pub fn percent_label(fraction: f32) -> String {
+    let tenths = (fraction * 1000.0).round() as i32;
+    if tenths % 10 == 0 {
+        format!("{}%", tenths / 10)
+    } else {
+        format!("{}.{}%", tenths / 10, tenths % 10)
+    }
+}
+
+impl Cap {
+    pub fn get(self, settings: &QuotaSettings) -> f32 {
+        match self {
+            Cap::Soft => settings.soft_cap,
+            Cap::Hard => settings.hard_cap,
+            Cap::Freeze => settings.freeze_cap,
+        }
+    }
+
+    fn set(self, settings: &mut QuotaSettings, value: f32) {
+        match self {
+            Cap::Soft => settings.soft_cap = value,
+            Cap::Hard => settings.hard_cap = value,
+            Cap::Freeze => settings.freeze_cap = value,
+        }
+    }
+}
+
+/// A loaded record: what the device has saved and what Save would send.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CapEditor {
+    pub saved: QuotaSettings,
+    pub draft: QuotaSettings,
+}
+
+impl CapEditor {
+    pub fn new(saved: QuotaSettings) -> Self {
         Self {
-            policy: settings.policy,
-            soft: percent(settings.soft_cap),
-            hard: percent(settings.hard_cap),
-            freeze: percent(settings.freeze_cap),
+            saved,
+            draft: saved,
         }
     }
 
-    pub fn to_settings(self) -> QuotaSettings {
-        QuotaSettings {
-            policy: self.policy,
-            soft_cap: fraction(self.soft),
-            hard_cap: fraction(self.hard),
-            freeze_cap: fraction(self.freeze),
-        }
-    }
-
-    pub fn defaults() -> Self {
-        Self::from_settings(&QuotaSettings::default())
-    }
-
-    pub fn get(self, cap: Cap) -> u8 {
-        match cap {
-            Cap::Soft => self.soft,
-            Cap::Hard => self.hard,
-            Cap::Freeze => self.freeze,
-        }
-    }
-
-    /// Move one cap by `delta` percent, staying inside [`Cap::range`]. A
-    /// stored value outside the range lands on its nearest edge.
+    /// Move one cap by `delta` percent inside [`Cap::range`]. A value outside
+    /// the range can only move towards it. Coming back to the saved percent
+    /// restores the saved value exactly.
     pub fn step(&mut self, cap: Cap, delta: i8) {
         let (min, max) = cap.range();
-        let next = (i16::from(self.get(cap)) + i16::from(delta))
-            .clamp(i16::from(min), i16::from(max)) as u8;
-        match cap {
-            Cap::Soft => self.soft = next,
-            Cap::Hard => self.hard = next,
-            Cap::Freeze => self.freeze = next,
+        let current = i16::from(percent(cap.get(&self.draft)));
+        let next = (current + i16::from(delta)).clamp(i16::from(min), i16::from(max));
+        if (next - current).signum() != i16::from(delta).signum() {
+            return;
         }
+        let next = next as u8;
+        let saved = cap.get(&self.saved);
+        let value = if next == percent(saved) {
+            saved
+        } else {
+            fraction(next)
+        };
+        cap.set(&mut self.draft, value);
     }
 
-    /// Why these caps cannot be saved, in the words the page shows.
-    pub fn error(self) -> Option<String> {
-        if !(HARD_CAP_MIN_PERCENT..=HARD_CAP_MAX_PERCENT).contains(&self.hard) {
+    /// Why the draft cannot be saved, in the words the page shows. The hard
+    /// cap's range applies only once the user moves it, so a mode change can
+    /// be saved beside a cap another client set outside that range.
+    pub fn error(&self) -> Option<String> {
+        let QuotaSettings {
+            soft_cap,
+            hard_cap,
+            freeze_cap,
+            ..
+        } = self.draft;
+        let hard_range = fraction(HARD_CAP_MIN_PERCENT)..=fraction(HARD_CAP_MAX_PERCENT);
+        if hard_cap != self.saved.hard_cap && !hard_range.contains(&hard_cap) {
             Some(format!(
                 "The hard cap must be between {HARD_CAP_MIN_PERCENT}% and \
                  {HARD_CAP_MAX_PERCENT}%."
             ))
-        } else if self.soft == 0 {
+        } else if soft_cap <= 0.0 {
             Some("The soft cap must be above 0%.".into())
-        } else if self.soft >= self.hard {
+        } else if soft_cap >= hard_cap {
             Some("The soft cap must be below the hard cap.".into())
-        } else if self.hard >= self.freeze {
+        } else if hard_cap >= freeze_cap {
             Some("The freeze cap must be above the hard cap.".into())
-        } else if self.freeze > 100 {
+        } else if freeze_cap > 1.0 {
             Some("The freeze cap cannot pass 100%.".into())
         } else {
             None
-        }
-    }
-}
-
-/// A loaded record: what the device has saved and what the controls show.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CapEditor {
-    pub saved: CapDraft,
-    pub draft: CapDraft,
-}
-
-impl CapEditor {
-    fn new(settings: &QuotaSettings) -> Self {
-        let saved = CapDraft::from_settings(settings);
-        Self {
-            saved,
-            draft: saved,
         }
     }
 
@@ -190,7 +195,7 @@ impl CapEditor {
     }
 
     pub fn can_save(&self) -> bool {
-        self.dirty() && self.draft.error().is_none()
+        self.dirty() && self.error().is_none()
     }
 }
 
@@ -250,7 +255,7 @@ impl QuotaCaps {
         if self.saving || !editor.can_save() {
             return;
         }
-        let params = match serde_json::to_value(editor.draft.to_settings()) {
+        let params = match serde_json::to_value(editor.draft) {
             Ok(params) => params,
             Err(error) => {
                 self.save_error = Some(error.to_string().into());
@@ -285,7 +290,7 @@ impl QuotaCaps {
     fn finish(&mut self, result: Result<QuotaSettings, String>) {
         let saving = std::mem::take(&mut self.saving);
         match result {
-            Ok(settings) => self.editor = Loadable::Ready(CapEditor::new(&settings)),
+            Ok(settings) => self.editor = Loadable::Ready(CapEditor::new(settings)),
             // A refused save keeps the draft so the user can retry or fix it.
             Err(error) if saving => self.save_error = Some(error.into()),
             Err(error) => self.editor = Loadable::Error(error),
@@ -294,18 +299,23 @@ impl QuotaCaps {
 
     /// Change the draft. Ignored while a save is in flight, whose reply would
     /// overwrite the change.
-    fn edit(&mut self, change: impl FnOnce(&mut CapDraft), cx: &mut Context<Self>) {
+    fn edit(&mut self, change: impl FnOnce(&mut CapEditor), cx: &mut Context<Self>) {
         if self.saving {
             return;
         }
         if let Loadable::Ready(editor) = &mut self.editor {
-            change(&mut editor.draft);
+            change(editor);
             self.save_error = None;
             cx.notify();
         }
     }
 
-    fn render_modes(&self, draft: CapDraft, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_modes(
+        &self,
+        draft: QuotaSettings,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         widgets::section_card(theme)
             .mt(px(8.0))
             .children(
@@ -317,7 +327,7 @@ impl QuotaCaps {
                             .id(("quota-mode", ix))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.edit(|draft| draft.policy = policy, cx)
+                                this.edit(|editor| editor.draft.policy = policy, cx)
                             }))
                             .child(text_column(theme, title, description))
                             .when(draft.policy == policy, |el| {
@@ -328,38 +338,38 @@ impl QuotaCaps {
             .into_any_element()
     }
 
-    fn render_caps(&self, draft: CapDraft, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_caps(&self, editor: CapEditor, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         widgets::section_card(theme)
             .mt(px(8.0))
             .children(Cap::ALL.into_iter().enumerate().map(|(ix, cap)| {
                 widgets::card_row(theme, ix == 0)
                     .child(text_column(theme, cap.title(), cap.description()))
-                    .child(self.render_step(draft, cap, -1, theme, cx))
+                    .child(self.render_step(editor, cap, -1, theme, cx))
                     .child(
                         div()
                             .flex_none()
                             .w(px(44.0))
                             .text_center()
-                            .text_size(crate::typography::ui_rems(13.0))
+                            .text_size(crate::typography::ui_rems(widgets::ROW_TITLE_SIZE))
                             .text_color(theme.text)
-                            .child(SharedString::from(format!("{}%", draft.get(cap)))),
+                            .child(SharedString::from(percent_label(cap.get(&editor.draft)))),
                     )
-                    .child(self.render_step(draft, cap, 1, theme, cx))
+                    .child(self.render_step(editor, cap, 1, theme, cx))
             }))
             .into_any_element()
     }
 
     fn render_step(
         &self,
-        draft: CapDraft,
+        editor: CapEditor,
         cap: Cap,
         delta: i8,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut next = draft;
+        let mut next = editor;
         next.step(cap, delta);
-        let enabled = !self.saving && next != draft;
+        let enabled = !self.saving && next != editor;
         let (direction, glyph) = if delta < 0 {
             ("down", "\u{2212}")
         } else {
@@ -372,11 +382,10 @@ impl QuotaCaps {
             )))
             .flex_none()
             .when(enabled, |el| {
-                el.hover(|s| widgets::ghost_hover(theme, s)).on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        this.edit(|draft| draft.step(cap, delta), cx)
-                    }),
-                )
+                el.hover(|s| widgets::ghost_hover(theme, s))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit(|editor| editor.step(cap, delta), cx)
+                    }))
             })
             .when(!enabled, |el| el.opacity(0.4))
             .child(SharedString::from(glyph))
@@ -390,7 +399,7 @@ impl QuotaCaps {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let can_save = !self.saving && editor.can_save();
-        let can_reset = !self.saving && editor.draft != CapDraft::defaults();
+        let can_reset = !self.saving && editor.draft != QuotaSettings::default();
         let label = if self.saving {
             "Saving\u{2026}"
         } else {
@@ -409,7 +418,7 @@ impl QuotaCaps {
                     .when(can_reset, |el| {
                         el.hover(|s| widgets::ghost_hover(theme, s))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.edit(|draft| *draft = CapDraft::defaults(), cx)
+                                this.edit(|editor| editor.draft = QuotaSettings::default(), cx)
                             }))
                     })
                     .when(!can_reset, |el| el.opacity(0.4))
@@ -456,13 +465,7 @@ impl Render for QuotaCaps {
             .mt(px(32.0))
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(14.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(SharedString::from("Quota caps")),
-            )
+            .child(widgets::field_label(&theme, "Quota caps"))
             .child(widgets::page_subtitle(&theme, SECTION_COPY))
             .child(widgets::page_subtitle(&theme, NOT_WIRED_COPY));
         match &self.editor {
@@ -480,7 +483,7 @@ impl Render for QuotaCaps {
                 .child(
                     div()
                         .mt(px(4.0))
-                        .text_size(crate::typography::ui_rems(11.5))
+                        .text_size(crate::typography::ui_rems(widgets::ROW_DESCRIPTION_SIZE))
                         .text_color(theme.text_muted)
                         .child(SharedString::from("Click to retry")),
                 ),
@@ -488,13 +491,12 @@ impl Render for QuotaCaps {
             Loadable::Ready(editor) => {
                 let editor = *editor;
                 let error = editor
-                    .draft
                     .error()
                     .map(SharedString::from)
                     .or_else(|| self.save_error.clone());
                 section
                     .child(self.render_modes(editor.draft, &theme, cx))
-                    .child(self.render_caps(editor.draft, &theme, cx))
+                    .child(self.render_caps(editor, &theme, cx))
                     .when_some(error, |el, message| {
                         el.child(widgets::error_strip(&theme, message))
                     })
@@ -509,28 +511,37 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    fn draft(soft: u8, hard: u8, freeze: u8) -> CapDraft {
-        CapDraft {
+    fn record(soft_cap: f32, hard_cap: f32, freeze_cap: f32) -> QuotaSettings {
+        QuotaSettings {
             policy: ProviderQuotaPolicy::BalancedFailover,
-            soft,
-            hard,
-            freeze,
+            soft_cap,
+            hard_cap,
+            freeze_cap,
         }
+    }
+
+    /// A draft of whole percents edited over the saved defaults.
+    fn drafted(soft: u8, hard: u8, freeze: u8) -> CapEditor {
+        let mut editor = CapEditor::new(QuotaSettings::default());
+        editor.draft = record(fraction(soft), fraction(hard), fraction(freeze));
+        editor
     }
 
     #[test]
     fn ordering_is_enforced_with_an_inline_error() {
-        assert_eq!(draft(78, 85, 90).error(), None);
-        assert_eq!(draft(1, 50, 100).error(), None);
-        for bad in [
-            draft(0, 85, 90),
-            draft(85, 85, 90),
-            draft(86, 85, 90),
-            draft(78, 90, 90),
-            draft(78, 91, 90),
-            draft(78, 85, 101),
+        assert_eq!(drafted(78, 85, 90).error(), None);
+        assert_eq!(drafted(1, 50, 100).error(), None);
+        for (soft, hard, freeze) in [
+            (0, 85, 90),
+            (85, 85, 90),
+            (86, 85, 90),
+            (78, 90, 90),
+            (78, 91, 90),
+            (78, 85, 101),
         ] {
-            assert!(bad.error().is_some(), "{bad:?}");
+            let editor = drafted(soft, hard, freeze);
+            assert!(editor.error().is_some(), "{soft} {hard} {freeze}");
+            assert!(!editor.can_save());
         }
     }
 
@@ -539,10 +550,9 @@ mod tests {
         for soft in 0..=100 {
             for hard in 0..=100 {
                 for freeze in [soft, hard, hard.saturating_add(1).min(100), 100] {
-                    let candidate = draft(soft, hard, freeze);
-                    if candidate.error().is_none() {
-                        candidate.to_settings().validate().unwrap();
-                        assert_eq!(CapDraft::from_settings(&candidate.to_settings()), candidate);
+                    let editor = drafted(soft, hard, freeze);
+                    if editor.error().is_none() {
+                        editor.draft.validate().unwrap();
                     }
                 }
             }
@@ -550,48 +560,100 @@ mod tests {
     }
 
     #[test]
-    fn hard_cap_stays_between_50_and_95() {
-        assert!(draft(40, 49, 90).error().is_some());
-        assert!(draft(40, 96, 100).error().is_some());
-        assert_eq!(draft(40, 50, 90).error(), None);
-        assert_eq!(draft(40, 95, 96).error(), None);
+    fn an_edited_hard_cap_stays_between_50_and_95() {
+        assert!(drafted(40, 49, 90).error().is_some());
+        assert!(drafted(40, 96, 100).error().is_some());
+        assert_eq!(drafted(40, 50, 90).error(), None);
+        assert_eq!(drafted(40, 95, 96).error(), None);
 
-        let mut low = draft(40, 50, 90);
+        let mut low = CapEditor::new(record(0.4, 0.5, 0.9));
         low.step(Cap::Hard, -1);
-        assert_eq!(low.hard, 50);
+        assert_eq!(low.draft.hard_cap, 0.5);
         low.step(Cap::Hard, 1);
-        assert_eq!(low.hard, 51);
+        assert_eq!(low.draft.hard_cap, 0.51);
 
-        let mut high = draft(40, 95, 100);
+        let mut high = CapEditor::new(record(0.4, 0.95, 1.0));
         high.step(Cap::Hard, 1);
-        assert_eq!(high.hard, 95);
         high.step(Cap::Freeze, 1);
-        assert_eq!(high.freeze, 100);
+        assert!(!high.dirty());
+    }
 
-        // A value saved by another client lands on the nearest edge.
-        let mut outside = draft(30, 40, 90);
-        outside.step(Cap::Hard, 1);
-        assert_eq!(outside.hard, 50);
+    #[test]
+    fn out_of_range_saved_caps_show_and_do_not_block_a_mode_change() {
+        for saved in [record(0.2, 0.4, 0.9), record(0.5, 0.97, 0.99)] {
+            let mut editor = CapEditor::new(saved);
+            assert_eq!(editor.error(), None);
+            editor.draft.policy = ProviderQuotaPolicy::PinnedFreeze;
+            assert!(editor.can_save());
+            assert_eq!(
+                (
+                    editor.draft.soft_cap,
+                    editor.draft.hard_cap,
+                    editor.draft.freeze_cap
+                ),
+                (saved.soft_cap, saved.hard_cap, saved.freeze_cap)
+            );
+        }
+        // A stepper only moves such a value towards the range, never the
+        // opposite way to the button pressed.
+        let mut below = CapEditor::new(record(0.2, 0.4, 0.9));
+        below.step(Cap::Hard, -1);
+        assert!(!below.dirty());
+        below.step(Cap::Hard, 1);
+        assert_eq!(below.draft.hard_cap, 0.5);
+        let mut above = CapEditor::new(record(0.5, 0.97, 0.99));
+        above.step(Cap::Hard, 1);
+        assert!(!above.dirty());
+        above.step(Cap::Hard, -1);
+        assert_eq!(above.draft.hard_cap, 0.95);
+    }
+
+    #[test]
+    fn unedited_fractional_caps_are_not_rounded() {
+        // Both round to 78%, yet they are validly ordered.
+        let saved = record(0.781, 0.784, 0.9);
+        let mut editor = CapEditor::new(saved);
+        assert_eq!(editor.error(), None);
+        editor.draft.policy = ProviderQuotaPolicy::PinnedFreeze;
+        assert!(editor.can_save());
+        editor.step(Cap::Freeze, 1);
+        assert_eq!(editor.draft.freeze_cap, 0.91);
+        assert_eq!(
+            (editor.draft.soft_cap, editor.draft.hard_cap),
+            (0.781, 0.784)
+        );
+
+        // Stepping away and back restores the saved value.
+        editor.step(Cap::Soft, -1);
+        assert_eq!(editor.draft.soft_cap, 0.77);
+        editor.step(Cap::Soft, 1);
+        assert_eq!(editor.draft.soft_cap, 0.781);
+
+        assert_eq!(percent_label(saved.soft_cap), "78.1%");
+        assert_eq!(percent_label(saved.hard_cap), "78.4%");
+        assert_eq!(percent_label(QuotaSettings::default().hard_cap), "85%");
+        assert_eq!(percent_label(1.0), "100%");
     }
 
     #[test]
     fn soft_and_freeze_may_cross_the_hard_cap_but_cannot_be_saved() {
-        let mut editor = CapEditor::new(&QuotaSettings::default());
+        let mut editor = CapEditor::new(QuotaSettings::default());
         assert!(!editor.can_save(), "unchanged");
         for _ in 0..7 {
-            editor.draft.step(Cap::Soft, 1);
+            editor.step(Cap::Soft, 1);
         }
-        assert_eq!(editor.draft.soft, 85);
+        assert_eq!(editor.draft.soft_cap, 0.85);
         assert!(editor.dirty() && !editor.can_save());
-        editor.draft.step(Cap::Hard, 1);
+        editor.step(Cap::Hard, 1);
         assert!(editor.can_save());
     }
 
     #[test]
-    fn reset_restores_the_defaults() {
-        let defaults = CapDraft::defaults();
-        assert_eq!(defaults, draft(78, 85, 90));
-        assert_eq!(defaults.to_settings(), QuotaSettings::default());
+    fn reset_restores_the_exact_defaults() {
+        let mut editor = CapEditor::new(record(0.781, 0.97, 0.99));
+        editor.draft = QuotaSettings::default();
+        assert!(editor.can_save());
+        assert_eq!(editor.draft, record(0.78, 0.85, 0.90));
     }
 
     type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
@@ -637,9 +699,9 @@ mod tests {
         cx.run_until_parked();
         section.update(cx, |section, cx| {
             section.edit(
-                |draft| {
-                    draft.policy = ProviderQuotaPolicy::PinnedFreeze;
-                    draft.step(Cap::Hard, -1);
+                |editor| {
+                    editor.draft.policy = ProviderQuotaPolicy::PinnedFreeze;
+                    editor.step(Cap::Hard, -1);
                 },
                 cx,
             );
@@ -676,7 +738,7 @@ mod tests {
         let (section, calls, _) = scripted(cx);
         section.update(cx, |section, cx| {
             section.save(cx);
-            section.edit(|draft| draft.soft = draft.hard, cx);
+            section.edit(|editor| editor.draft.soft_cap = editor.draft.hard_cap, cx);
             section.save(cx);
         });
         cx.run_until_parked();
@@ -688,12 +750,12 @@ mod tests {
         let (section, calls, refuse) = scripted(cx);
         *refuse.lock().unwrap() = true;
         section.update(cx, |section, cx| {
-            section.edit(|draft| draft.step(Cap::Freeze, 1), cx);
+            section.edit(|editor| editor.step(Cap::Freeze, 1), cx);
             section.save(cx);
         });
         cx.run_until_parked();
         let kept = editor(&section, cx);
-        assert_eq!((kept.draft.freeze, kept.saved.freeze), (91, 90));
+        assert_eq!((kept.draft.freeze_cap, kept.saved.freeze_cap), (0.91, 0.90));
         section.read_with(cx, |section, _| {
             assert!(!section.saving);
             assert_eq!(section.save_error.as_deref(), Some("refused"));
@@ -702,12 +764,12 @@ mod tests {
         // Refresh must not throw the unsaved edit away.
         section.update(cx, |section, cx| section.refresh(cx));
         cx.run_until_parked();
-        assert_eq!(editor(&section, cx).draft.freeze, 91);
+        assert_eq!(editor(&section, cx).draft.freeze_cap, 0.91);
         assert_eq!(calls.lock().unwrap().len(), 2);
 
         // Reset changes the draft only; the saved record needs a Save.
         section.update(cx, |section, cx| {
-            section.edit(|draft| *draft = CapDraft::defaults(), cx)
+            section.edit(|editor| editor.draft = QuotaSettings::default(), cx)
         });
         assert!(!editor(&section, cx).dirty());
         assert_eq!(calls.lock().unwrap().len(), 2);
@@ -717,7 +779,7 @@ mod tests {
     fn switching_device_drops_the_other_devices_draft(cx: &mut gpui::TestAppContext) {
         let (section, _, _) = scripted(cx);
         section.update(cx, |section, cx| {
-            section.edit(|draft| draft.step(Cap::Hard, -1), cx);
+            section.edit(|editor| editor.step(Cap::Hard, -1), cx);
             section.set_target_device(Some("there".into()), cx);
             assert!(
                 section.editor.ready().is_none(),
