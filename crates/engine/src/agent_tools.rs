@@ -4009,9 +4009,9 @@ impl AgentToolsService {
             candidates.push(chat);
         }
         let Some(source) = candidates.into_iter().max_by_key(|chat| chat.created_at) else { return Ok(None) };
-        // Only a worker that stopped is continued: one that errored, or one
-        // with no live session (after a restart). An idle worker that finished
-        // is reused by `create_chat`, and a running one is not duplicated.
+        // Only a worker whose last turn errored (a usage limit, a crash) is
+        // continued. An idle worker that finished is reused by `create_chat`,
+        // and a running one is not duplicated.
         let status = lock(&self.sessions).as_ref().and_then(|sessions| sessions.session_status(&source.id))
             .map(|session| session.status);
         match status {
@@ -4021,8 +4021,8 @@ impl AgentToolsService {
                     source.id
                 )));
             }
-            Some(mast_proto::SessionStatus::Idle) => return Ok(None),
-            Some(mast_proto::SessionStatus::Errored) | None => {}
+            Some(mast_proto::SessionStatus::Errored) => {}
+            Some(mast_proto::SessionStatus::Idle) | None => return Ok(None),
         }
         Ok(Some(source.id))
     }

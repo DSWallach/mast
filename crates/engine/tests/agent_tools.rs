@@ -2179,6 +2179,14 @@ async fn launching_for_an_item_with_a_stopped_worker_continues_it_as_a_hand_off(
     rig.client.call(methods::MUTATE, json!({"op":"createChat", "chatId":"cont-old", "spaceId":SPACE,
         "deviceId":rig.core.device_id, "parentChatId":CHAT})).await.unwrap();
     assign_chat(&rig, "cont-old-assignment", "cont-old", &task).await;
+    // The worker's last turn errored: it is the one that stopped.
+    *rig.harness.events.lock().unwrap() = vec![
+        AgentEvent::Error { code: None, resets_at: None, message: "usage limit".into() },
+        AgentEvent::Done { status: DoneStatus::Errored, result: None, error: None, session_id: None },
+    ];
+    rig.core.doc_host.queue_command("cont-old", run_command("go", &rig.space_path)).unwrap();
+    wait_for(|| rig.core.sessions.session_status("cont-old")
+        .is_some_and(|session| session.status == mast_proto::SessionStatus::Errored), "the worker's errored turn").await;
     let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-cont", SPACE, &rig.core.device_id);
     let token = lease.token().to_owned();
     let key = "cont-next";
