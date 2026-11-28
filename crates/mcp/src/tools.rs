@@ -1247,7 +1247,7 @@ impl Tools {
             Some("lead") if self.zeron.is_peer() => {
                 let item = args.lead_item_id.as_deref().map(str::trim).filter(|i| !i.is_empty())
                     .ok_or_else(|| anyhow::anyhow!("a Lead on a paired device needs leadItemId (its work item on your device)"))?;
-                if explicit_parent.is_none() {
+                if parent_chat_id.is_none() {
                     anyhow::bail!("a Lead on a paired device needs parent (your Manager chat)");
                 }
                 let local = self.zeron.local_device_id().await?;
