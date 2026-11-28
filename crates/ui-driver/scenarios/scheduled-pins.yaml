@@ -8,7 +8,7 @@ steps:
         outline-row-scheduled-fixture-task-1-0: { top_edge_within: [0, 760] }
         outline-row-scheduled-fixture-task-1-1: { top_edge_within: [0, 760] }
     criterion: scheduled-pins.1
-    caption: Overview shows the work outline and both scheduled tasks.
+    caption: Overview shows the work outline and both scheduled tasks, neither pinned.
   - key: "mod-,"
     caption: Open Settings.
   - click: "#settings-nav-Appearance"
@@ -23,17 +23,40 @@ steps:
   - click: "#settings-back"
     caption: Return to the workspace.
   - click: "#outline-disclosure-scheduled"
+    caption: Collapse Scheduled with nothing pinned.
+  - expect:
+      not_visible: "#outline-row-scheduled-fixture-task-1-0"
+    criterion: scheduled-pins.3
+    caption: With no pins, collapsing hides every scheduled task.
+  - click: "#outline-disclosure-scheduled"
+    caption: Expand Scheduled.
+  - right_click: "#outline-row-scheduled-fixture-task-1-0"
+    caption: Open the Weekly report row menu.
+  - click: "#chat-menu-pin"
+    caption: Pin Weekly report from the row menu.
+  - click: "#outline-disclosure-scheduled"
     caption: Collapse Scheduled.
   - expect:
       visible: "#outline-row-scheduled-fixture-task-1-0"
       not_visible: "#outline-row-scheduled-fixture-task-1-1"
-    criterion: scheduled-pins.3
-    caption: Weekly report stays visible and Morning briefing is hidden.
-  - click: "#outline-disclosure-scheduled"
-    caption: Expand Scheduled.
-  - expect:
-      bounds:
-        outline-row-scheduled-fixture-task-1-0: { top_edge_within: [0, 760] }
-        outline-row-scheduled-fixture-task-1-1: { top_edge_within: [0, 760] }
     criterion: scheduled-pins.4
-    caption: Scheduled shows both tasks again.
+    caption: Weekly report stays visible and Morning briefing is hidden.
+  - restart
+  - expect:
+      visible: "#outline-row-scheduled-fixture-task-1-0"
+    criterion: scheduled-pins.5
+    caption: After a restart the pinned Weekly report is still shown.
+  - click: "#outline-row-scheduled-fixture-task-1-0"
+    caption: Open the pinned task's latest run.
+  - expect:
+      visible: "#outline-row-scheduled-fixture-task-1-0"
+    criterion: scheduled-pins.6
+    caption: The pinned task's run opens and its row stays in the outline.
+  - right_click: "#outline-row-scheduled-fixture-task-1-0"
+    caption: Open the Weekly report row menu again.
+  - click: "#chat-menu-pin"
+    caption: Unpin Weekly report.
+  - expect:
+      not_visible: "#outline-row-scheduled-fixture-task-1-0"
+    criterion: scheduled-pins.7
+    caption: With Scheduled still collapsed, the unpinned task leaves the outline.

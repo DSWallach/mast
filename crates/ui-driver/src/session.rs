@@ -378,6 +378,15 @@ impl Session {
         Ok(timing)
     }
 
+    /// Right-click the element and settle.
+    pub fn right_click(&mut self, locator: &str) -> Result<Timing, String> {
+        let started = Instant::now();
+        self.pointer(locator, &[MouseButton::Right])?;
+        let mut timing = self.settle();
+        timing.wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+        Ok(timing)
+    }
+
     /// Move the pointer over the element (no click) and settle.
     pub fn hover(&mut self, locator: &str) -> Result<Timing, String> {
         let started = Instant::now();

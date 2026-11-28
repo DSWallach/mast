@@ -116,7 +116,7 @@ impl SmallWorld {
         world.preset = Self::preset_name(preset)?;
         match world.preset {
             Self::SCHEDULED_PINS => {
-                world.scheduled = [("Weekly report", true), ("Morning briefing", false)]
+                world.scheduled = [("Weekly report", false), ("Morning briefing", false)]
                     .into_iter()
                     .enumerate()
                     .map(|(index, (title, pinned))| ScheduledFixture {
