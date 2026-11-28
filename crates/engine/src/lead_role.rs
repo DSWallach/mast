@@ -363,4 +363,19 @@ mod tests {
         assert!(packet.render().contains("ship it") && packet.render().contains("crates/engine/**"));
         assert_eq!(packet.budget.max_tokens, Some(5));
     }
+
+    #[test]
+    fn a_report_with_scope_and_token_lines_still_digests_within_the_cap() {
+        let digest_lines = format!(
+            "Scope: edited outside the task's ownedPaths (flagged, not reverted): {}\nTokens: {{\"inputTokens\":123456,\"turns\":40}}",
+            (0..80).map(|n| format!("crates/engine/src/some/long/path_{n}.rs")).collect::<Vec<_>>().join(", ")
+        );
+        let report = format!("Slice merged, 2 PRs open.\n{}\n{digest_lines}", "detail ".repeat(2_000));
+        let out = digest_for_manager("item", "chat", &report);
+        assert!(mast_proto::approx_tokens(&out) <= mast_proto::MAX_LEAD_DIGEST_TOKENS, "{} bytes", out.len());
+        assert!(out.contains("Slice merged, 2 PRs open."));
+        // Lines past the cap are cut, not the headline.
+        let short = format!("Done.\n{digest_lines}");
+        assert!(mast_proto::approx_tokens(&digest_for_manager("item", "chat", &short)) <= mast_proto::MAX_LEAD_DIGEST_TOKENS);
+    }
 }

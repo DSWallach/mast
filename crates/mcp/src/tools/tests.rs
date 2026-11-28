@@ -2122,6 +2122,44 @@ async fn agent_create_chat_in_a_project_starts_the_worker_under_its_destination(
 }
 
 #[tokio::test]
+async fn create_chat_standing_role_lead_reaches_the_launch_and_needs_an_item() {
+    let world = Arc::new(World::default());
+    let tools = tools(world.clone(), Some(BETA_TOKEN));
+    tools
+        .call(
+            "create_chat",
+            json!({ "idempotencyKey": "lead-1", "workItemId": "item-slice", "prompt": "lead it", "standingRole": "lead" }),
+        )
+        .await
+        .unwrap();
+    let launches = world.agent_calls(agent_tool_names::LAUNCH_CHILD_CHAT);
+    assert_eq!(launches.len(), 1);
+    assert_eq!(launches[0]["arguments"]["standingRole"], "lead");
+    assert_eq!(launches[0]["arguments"]["workItemId"], "item-slice");
+    // A Lead is its own chat: never a reused one.
+    assert_eq!(launches[0]["arguments"]["separate"], true);
+    // A plain worker carries no role.
+    tools
+        .call("create_chat", json!({ "idempotencyKey": "w-1", "workItemId": "item-leaf", "prompt": "go" }))
+        .await
+        .unwrap();
+    let launches = world.agent_calls(agent_tool_names::LAUNCH_CHILD_CHAT);
+    assert!(launches[1]["arguments"]["standingRole"].is_null(), "{}", launches[1]);
+    // A Lead needs the slice's item, and no other role is offered.
+    let err = tools
+        .call("create_chat", json!({ "idempotencyKey": "lead-2", "prompt": "lead it", "standingRole": "lead" }))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("needs a workItemId"), "{err}");
+    let err = tools
+        .call("create_chat", json!({ "idempotencyKey": "lead-3", "workItemId": "item-slice", "prompt": "x", "standingRole": "manager" }))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("must be \"lead\""), "{err}");
+    assert_eq!(world.agent_calls(agent_tool_names::LAUNCH_CHILD_CHAT).len(), 2);
+}
+
+#[tokio::test]
 async fn agent_create_chat_without_a_destination_does_not_create_an_item() {
     let world = Arc::new(World::default());
     let tools = tools(world.clone(), Some(BETA_TOKEN));

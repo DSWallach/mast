@@ -158,6 +158,10 @@ async fn worker_worktree_is_opt_in_and_avoids_branch_collisions() {
 /// A rig whose mock declares `mock`'s support; `instructions` adds one
 /// Space-root instruction (so every item has effective instructions).
 async fn rig_with(mock: InstructionMockHarness, instructions: bool) -> Rig {
+    rig_with_extra(mock, instructions, None).await
+}
+
+async fn rig_with_extra(mock: InstructionMockHarness, instructions: bool, extra: Option<Arc<dyn mast_harness::Harness>>) -> Rig {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let repo = root.join("repo");
@@ -167,6 +171,9 @@ async fn rig_with(mock: InstructionMockHarness, instructions: bool) -> Rig {
     std::fs::write(data.join("device-id"), DEVICE).unwrap();
     let harnesses = HarnessRegistry::new();
     harnesses.register(Arc::new(mock.clone()));
+    if let Some(extra) = extra {
+        harnesses.register(extra);
+    }
     let core = EngineCore::assemble(&data, Arc::new(harnesses), HarnessId::Mock, None)
         .expect("engine core assembles");
     let client = mast_rpc::memory_client(core.rpc_service());
@@ -6736,5 +6743,98 @@ async fn only_the_leads_own_workers_are_exempt_from_its_subtree_lease() {
     let other = lead_item(&rig, "Other", Some(&slice), json!({ "taskClass": class, "ownedPaths": ["crates/engine/src/b.rs"] })).await;
     let refused = start_worker(&rig, &other, "other", &manager).await.unwrap_err();
     assert!(refused.message.contains("Path lease"), "{}", refused.message);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lead_handed_off_keeps_its_role_slice_and_workers() {
+    let (rig, manager) = lead_rig().await;
+    let slice = lead_item(&rig, "Slice", None, json!({ "ownedPaths": ["crates/engine/**"] })).await;
+    let lead = start_lead(&rig, &slice, "lead", Some(&manager)).await.unwrap();
+    settle(&rig, &lead).await;
+    let leaf = lead_item(&rig, "Leaf", Some(&slice), json!({ "ownedPaths": ["crates/engine/src/a.rs"] })).await;
+    let worker = start_worker(&rig, &leaf, "leaf", &lead).await.unwrap();
+    // The existing hand-off path, as an agent calls it. It adds no Lead and
+    // carries the Lead's read-only sandbox and parent over.
+    rig.client
+        .call(methods::HAND_OFF_ORCHESTRATOR, json!({ "chatId": lead, "summary": "Continue the slice", "operationId": "lead-handoff" }))
+        .await
+        .unwrap();
+    wait_for(|| rig.core.workspace.standing_role_chat(Lead, &slice).is_some_and(|chat| chat != lead), "Lead successor").await;
+    let successor = rig.core.workspace.standing_role_chat(Lead, &slice).unwrap();
+    let chat = rig.core.workspace.chat(&successor).unwrap().unwrap();
+    assert_eq!(chat.config.as_ref().unwrap().sandbox, SandboxLevel::ReadOnly);
+    assert_eq!(chat.parent_chat_id.as_deref(), Some(manager.as_str()));
+    assert!(rig.core.workspace.chat(&lead).unwrap().unwrap().archived);
+    assert_eq!(rig.core.workspace.standing_role(Lead, &slice).unwrap().chain, vec![lead.clone(), successor.clone()]);
+    assert_eq!(rig.core.workspace.live_parent(&worker).as_deref(), Some(successor.as_str()), "the Worker follows its Lead");
+    // The Worker's reports now reach the successor, still never the Manager.
+    let chats = rig.core.workspace.read_chats().unwrap();
+    rig.core.orchestrator_wakes.ingest_chats(&chats).await;
+    rig.core.orchestrator_wakes.report_to_parent(&worker, "LEAF-NOISE after handoff").await.unwrap();
+    let to_manager = rig.core.orchestrator_wakes.status(&manager);
+    assert!(to_manager.held.iter().chain(&to_manager.recent).all(|e| e.worker_chat_id != worker), "{to_manager:?}");
+    let to_successor = rig.core.orchestrator_wakes.status(&successor);
+    assert!(to_successor.held.iter().any(|e| e.worker_chat_id == worker), "{to_successor:?}");
+    // The role is still one Lead: a fifth item has room for three more.
+    for n in 0..3 {
+        let item = lead_item(&rig, &format!("More {n}"), None, json!({ "ownedPaths": [format!("crates/m{n}/**")] })).await;
+        start_lead(&rig, &item, &format!("more-{n}"), Some(&manager)).await.unwrap();
+    }
+    rig.core.shutdown().await;
+}
+
+/// The mock, presented as Antigravity: installed, but with no read-only mode.
+struct NoReadOnlyHarness(InstructionMockHarness);
+
+#[async_trait::async_trait]
+impl mast_harness::Harness for NoReadOnlyHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Antigravity
+    }
+    fn display_name(&self) -> &str {
+        "Antigravity (test)"
+    }
+    fn capabilities(&self) -> mast_harness::HarnessCapabilities {
+        mast_harness::capabilities(HarnessId::Antigravity)
+    }
+    fn reasoning_levels(&self) -> &[mast_proto::ReasoningLevel] {
+        &[mast_proto::ReasoningLevel::Medium]
+    }
+    fn instruction_support(&self) -> mast_harness::InstructionSupport {
+        self.0.instruction_support()
+    }
+    async fn models(&self) -> Result<Vec<mast_proto::Model>, mast_harness::HarnessError> {
+        self.0.models().await
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: mast_harness::RunControls,
+    ) -> Result<futures::stream::BoxStream<'static, Result<mast_proto::AgentEvent, mast_harness::HarnessError>>, mast_harness::HarnessError> {
+        self.0.run(request, controls).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lead_is_refused_on_a_harness_with_no_read_only_mode() {
+    use mast_harness::Harness as _;
+    let mock = InstructionMockHarness::default();
+    let rig = rig_with_extra(mock.clone(), true, Some(Arc::new(NoReadOnlyHarness(mock)))).await;
+    mark_project(&rig).await;
+    let manager = launch(&rig, &manager_params(&rig, "lead-manager", "Manage")).await.unwrap().chat_id;
+    wait_for(|| manager_chat(&rig).as_deref() == Some(manager.as_str()), "Manager role").await;
+    settle(&rig, &manager).await;
+    let slice = lead_item(&rig, "Slice", None, json!({})).await;
+    let mut p = params(&rig, "lead-ag", "Lead this slice");
+    p.work_item_id = slice.clone();
+    p.parent_chat_id = Some(manager.clone());
+    p.standing_role = Some(Lead);
+    p.config.as_mut().unwrap().harness = HarnessId::Antigravity;
+    let refused = launch(&rig, &p).await.unwrap_err();
+    assert!(refused.message.contains("has no read-only mode"), "{}", refused.message);
+    assert!(rig.core.workspace.standing_role_chat(Lead, &slice).is_none());
+    // The same Lead on a harness that can enforce it starts.
+    start_lead(&rig, &slice, "lead-mock", Some(&manager)).await.unwrap();
     rig.core.shutdown().await;
 }
