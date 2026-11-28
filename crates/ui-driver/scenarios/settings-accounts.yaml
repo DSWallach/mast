@@ -1,5 +1,6 @@
 # Settings → Accounts, Quota caps, on the embedded engine: move a provider's hard-cap slider, see
 # an invalid cap refused, then save. The world seeds engine data only; every step below is a UI action.
+# Provider usage comes from the driver's fake backend (no real sign-in, network or `agy`).
 # The page has no a11y text nodes, so state is read through selectors that carry it:
 # #quota-cap-value-<provider>-<percent> marks the shown cap, #quota-caps-error the refusal.
 name: settings-accounts
@@ -19,6 +20,15 @@ steps:
   - expect: { visible: "#quota-caps-save-disabled" }
     criterion: quota-caps.2
     caption: Nothing has changed, so Save is disabled.
+  # Usage comes from the driver's fake backend: Claude reads 62%, Codex's sign-in is rejected.
+  - expect:
+      visible: "#quota-headroom-claude-code-62"
+      timeout_ms: 10000
+    caption: Claude Code's headroom bar shows the quota broker's 62%.
+  - expect:
+      visible: "#quota-headroom-codex-unavailable"
+    criterion: quota-caps.8
+    caption: Codex's probe is rejected, so its usage shows as unavailable.
   - click: "#quota-cap-codex-80"
     caption: Click the 80% notch on Codex's slider.
   - expect:

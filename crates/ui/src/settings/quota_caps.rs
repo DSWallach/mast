@@ -505,7 +505,7 @@ impl QuotaCaps {
                             ),
                     )
                     .child(self.render_slider(id, cap, theme, cx))
-                    .child(render_headroom(windows, cap, theme, now))
+                    .child(render_headroom(id, windows, cap, theme, now))
             }))
             .into_any_element()
     }
@@ -684,6 +684,7 @@ fn text_column(theme: &Theme, title: &'static str, description: &'static str) ->
 
 /// The headroom bars of one provider: its time windows, then its models.
 fn render_headroom(
+    provider: &'static str,
     windows: &[HeadroomWindow],
     cap: f32,
     theme: &Theme,
@@ -696,14 +697,16 @@ fn render_headroom(
             .child(SharedString::from(text))
     };
     if windows.is_empty() {
-        return quiet("Usage unavailable").into_any_element();
+        return quiet("Usage unavailable")
+            .debug_selector(move || format!("quota-headroom-{provider}-unavailable"))
+            .into_any_element();
     }
     let (models, times): (Vec<_>, Vec<_>) = windows.iter().partition(|window| window.model.is_some());
     div()
         .flex()
         .flex_col()
         .gap(px(4.0))
-        .children(times.into_iter().map(|window| headroom_bar(window, cap, theme, now)))
+        .children(times.into_iter().map(|window| headroom_bar(provider, window, cap, theme, now)))
         .when(!models.is_empty(), |el| {
             el.child(
                 div()
@@ -713,12 +716,13 @@ fn render_headroom(
                     .child(SharedString::from("Per model")),
             )
         })
-        .children(models.into_iter().map(|window| headroom_bar(window, cap, theme, now)))
+        .children(models.into_iter().map(|window| headroom_bar(provider, window, cap, theme, now)))
         .into_any_element()
 }
 
 /// One window: label · bar with the cap marked · percent used · room left.
 fn headroom_bar(
+    provider: &'static str,
     window: &HeadroomWindow,
     cap: f32,
     theme: &Theme,
@@ -731,7 +735,9 @@ fn headroom_bar(
         HeadroomState::Over => theme.danger.opacity(0.85),
     };
     let reset = crate::settings::accounts::format_reset(window.resets_at, now);
+    let used = percent(headroom.used);
     div()
+        .debug_selector(move || format!("quota-headroom-{provider}-{used}"))
         .flex()
         .flex_row()
         .items_center()

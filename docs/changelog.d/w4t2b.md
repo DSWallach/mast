@@ -5,4 +5,5 @@
 - The Quota caps headroom bars on Accounts now come from the broker, through the new read-only `GetQuotaHeadroom` request. Older engines keep showing account windows.
 - Balanced failover holds each provider to its own hard cap. Pinned freeze stops at that cap when you set one, and at the freeze cap otherwise.
 - Poll intervals and the reservation TTL are bounds-checked. After reactivation, or when a reading is older than three poll intervals, a provider takes no new work until it is read again.
+- Providers are probed in parallel, one probe each at a time, so a slow one does not hold up other reads. Saving caps keeps the current readings and does not probe early.
 - Mast does not yet dispatch, pause or freeze work with the broker.

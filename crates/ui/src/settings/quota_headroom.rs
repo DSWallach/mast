@@ -61,11 +61,12 @@ impl HeadroomSource for BrokerWindows<'_> {
             HarnessId::Antigravity => "antigravity",
             _ => return Vec::new(),
         };
-        live.providers
-            .iter()
-            .find(|provider| provider.harness == id)
-            .map(broker_windows)
-            .unwrap_or_default()
+        match live.providers.iter().find(|provider| provider.harness == id) {
+            // Another read is still making the first probe.
+            Some(provider) if provider.pending => self.accounts.windows(harness),
+            Some(provider) => broker_windows(provider),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -249,6 +250,13 @@ mod tests {
         assert_eq!(agy[0].label, "Estimated");
         assert_eq!(agy[0].used, 0.4);
         assert!(broker.windows(HarnessId::Codex).is_empty());
+        let mut pending = live.clone();
+        pending.providers[2] = ProviderHeadroom {
+            harness: "codex".into(),
+            pending: true,
+            ..Default::default()
+        };
+        assert_eq!(source(Some(&pending)).windows(HarnessId::Codex)[0].used, 0.1);
     }
 
     #[test]

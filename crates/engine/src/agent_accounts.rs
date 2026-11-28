@@ -374,7 +374,18 @@ pub fn inspect_sign_in_file(path: &Path, pointer: &str, alternative: Option<&str
 }
 
 impl AgentAccounts {
-    pub fn new(config: AgentAccountsConfig) -> Self {
+    pub fn new(mut config: AgentAccountsConfig) -> Self {
+        let fake_usage = crate::driver_hooks::fake_usage();
+        if let Some(fake) = &fake_usage {
+            config.claude_config_dir = fake.sign_ins.join("claude");
+            config.claude_config_file = config.claude_config_dir.join(".claude.json");
+            config.codex_home = fake.sign_ins.join("codex");
+            config.cursor_sdk_auth_file = fake.sign_ins.join("cursor.json");
+        }
+        let usage_urls = fake_usage.as_ref().map_or_else(
+            || (CLAUDE_USAGE_URL.to_string(), CODEX_USAGE_URL.to_string()),
+            |fake| (format!("{}/claude", fake.url), format!("{}/codex", fake.url)),
+        );
         // Startup sweep: a previous process that crashed mid-login leaves
         // `.login-<uuid>` throwaway CODEX_HOME dirs — each may hold live OAuth
         // tokens — with no owner to clean them. Reclaim them at boot.
@@ -400,7 +411,7 @@ impl AgentAccounts {
                 flows: Mutex::new(HashMap::new()),
                 usage_cache: Mutex::new(HashMap::new()),
                 usage_notes: Mutex::new(HashMap::new()),
-                usage_urls: Mutex::new((CLAUDE_USAGE_URL.to_string(), CODEX_USAGE_URL.to_string())),
+                usage_urls: Mutex::new(usage_urls),
                 inflight_refreshes: Mutex::new(std::collections::HashSet::new()),
                 last_active: Mutex::new(None),
             }),
@@ -1910,6 +1921,10 @@ impl AgentAccounts {
             if let Ok(val) = serde_json::from_str(&fake_json) {
                 return parse_antigravity_usage(&val);
             }
+        }
+
+        if crate::driver_hooks::fake_usage().is_some() {
+            return None;
         }
 
         let exe = mast_harness::antigravity_cli_path()?;

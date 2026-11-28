@@ -159,6 +159,9 @@ pub struct ProviderHeadroom {
     /// The local estimate, only while probes fail.
     pub estimated: Option<f32>,
     pub needs_sign_in: bool,
+    /// The first probe is still in flight, so there is nothing to show yet.
+    #[serde(default)]
+    pub pending: bool,
 }
 
 /// What a `quota_status` reply adds to the account caches.
@@ -173,8 +176,9 @@ pub(crate) struct QuotaService(Arc<Inner>);
 #[derive(Default)]
 struct Inner {
     estimator: OnceLock<Arc<Estimator>>,
-    /// Held across a poll so concurrent reads cannot probe twice.
-    broker: tokio::sync::Mutex<Option<(QuotaSettings, Arc<QuotaBroker>)>>,
+    /// Locked only to pick up the broker, never while probing: the broker
+    /// itself keeps one probe per provider in flight.
+    broker: Mutex<Option<(QuotaSettings, Arc<QuotaBroker>)>>,
 }
 
 /// An engine builds one RPC surface per transport (in-app, relay, peers), so
@@ -194,46 +198,60 @@ impl QuotaService {
         service
     }
 
-    /// The broker for the saved caps, with every due provider polled. Changed
-    /// caps rebuild it; it holds no reservations since nothing dispatches.
+    /// The one broker, holding the saved caps. Changed caps are applied to it
+    /// in place, keeping its readings and poll times.
+    fn broker(
+        &self,
+        accounts: &AgentAccounts,
+        usage: Option<TokenUsage>,
+        settings: QuotaSettings,
+    ) -> Result<Arc<QuotaBroker>, String> {
+        let mut config = BrokerConfig::default();
+        settings.apply_to(&mut config);
+        let mut slot = lock(&self.0.broker);
+        if let Some((saved, broker)) = slot.as_mut() {
+            if *saved != settings {
+                broker
+                    .set_config(config)
+                    .map_err(|error| error.to_string())?;
+                *saved = settings;
+            }
+            return Ok(broker.clone());
+        }
+        let estimator = self.0.estimator.get_or_init(|| {
+            Arc::new(Estimator {
+                clock: Box::new(SystemClock),
+                totals: usage.map(|u| Box::new(u) as Box<dyn TokenTotals>),
+                anchors: Mutex::default(),
+            })
+        });
+        let probe = LiveProbe {
+            accounts: accounts.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            estimator: estimator.clone(),
+        };
+        let broker = QuotaBroker::new(
+            config,
+            Box::new(SystemClock),
+            Box::new(probe),
+            Box::new(LedgerFallback(estimator.clone())),
+        )
+        .map_err(|error| error.to_string())?;
+        broker.set_orchestration_active(true);
+        let broker = Arc::new(broker);
+        *slot = Some((settings, broker.clone()));
+        Ok(broker)
+    }
+
+    /// The broker after polling what is due and not already being polled by
+    /// another read; that read's providers show their last data.
     async fn refreshed(
         &self,
         accounts: &AgentAccounts,
         usage: Option<TokenUsage>,
         store_root: PathBuf,
     ) -> Result<Arc<QuotaBroker>, String> {
-        let mut slot = self.0.broker.lock().await;
-        let settings = quota_settings::load(&store_root);
-        let broker = match slot.as_ref() {
-            Some((saved, broker)) if *saved == settings => broker.clone(),
-            _ => {
-                let estimator = self.0.estimator.get_or_init(|| {
-                    Arc::new(Estimator {
-                        clock: Box::new(SystemClock),
-                        totals: usage.map(|u| Box::new(u) as Box<dyn TokenTotals>),
-                        anchors: Mutex::default(),
-                    })
-                });
-                let mut config = BrokerConfig::default();
-                settings.apply_to(&mut config);
-                let probe = LiveProbe {
-                    accounts: accounts.clone(),
-                    runtime: tokio::runtime::Handle::current(),
-                    estimator: estimator.clone(),
-                };
-                let broker = QuotaBroker::new(
-                    config,
-                    Box::new(SystemClock),
-                    Box::new(probe),
-                    Box::new(LedgerFallback(estimator.clone())),
-                )
-                .map_err(|error| error.to_string())?;
-                broker.set_orchestration_active(true);
-                let broker = Arc::new(broker);
-                *slot = Some((settings, broker.clone()));
-                broker
-            }
-        };
+        let broker = self.broker(accounts, usage, quota_settings::load(&store_root))?;
         let polling = broker.clone();
         tokio::task::spawn_blocking(move || polling.poll_due())
             .await
@@ -366,6 +384,63 @@ mod tests {
         (url, requests)
     }
 
+    /// Never answers claude; answers codex at once.
+    async fn hanging_claude() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buffer = [0u8; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                if String::from_utf8_lossy(&buffer[..read]).starts_with("GET /claude") {
+                    held.push(stream);
+                    continue;
+                }
+                let body = r#"{"rate_limit":{"primary_window":{"used_percent":25.0}}}"#;
+                let response = format!(
+                    "HTTP/1.1 200 X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        url
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hanging_provider_does_not_block_another_status_read() {
+        let root = tempfile::tempdir().unwrap();
+        let (accounts, _) = signed_in(root.path());
+        let url = hanging_claude().await;
+        accounts.set_usage_urls(&format!("{url}/claude"), &format!("{url}/codex"));
+        let service = QuotaService::default();
+        let first = tokio::spawn({
+            let (service, accounts) = (service.clone(), accounts.clone());
+            let root = root.path().to_path_buf();
+            async move { service.status(&accounts, None, root).await.map(|_| ()) }
+        });
+        // Well inside the 15 s probe timeouts.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let status = service
+                    .status(&accounts, None, root.path().to_path_buf())
+                    .await
+                    .unwrap();
+                if status.payload["providers"]["codex"]["used"] == 0.25 {
+                    assert!(status.payload["providers"]["claude"]["used"].is_null());
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a read waited on the hanging provider");
+        assert!(!first.is_finished(), "claude was still in flight");
+        first.abort();
+    }
+
     fn signed_in(root: &std::path::Path) -> (AgentAccounts, [PathBuf; 2]) {
         let claude = root.join("claude");
         let codex = root.join("codex");
@@ -456,6 +531,7 @@ mod tests {
         };
         quota_settings::save(root.path(), &settings).unwrap();
         assert_eq!(read().await.unwrap().wake, None);
+        assert_eq!(lock(&requests).len(), 2, "saving caps does not probe early");
     }
 
     #[test]

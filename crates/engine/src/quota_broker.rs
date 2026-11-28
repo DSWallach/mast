@@ -17,7 +17,7 @@
 //! that needs sign-in (even with a local estimate).
 
 use std::collections::BTreeMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -295,6 +295,8 @@ struct State {
     reservations: BTreeMap<u64, Reservation>,
     next_reservation: u64,
     current: Option<Provider>,
+    /// Providers with a probe in flight, indexed by `Provider as usize`.
+    polling: [bool; 3],
 }
 
 impl State {
@@ -322,8 +324,26 @@ impl State {
     }
 }
 
+/// Clears a provider's in-flight mark, also when its probe panics.
+struct Flight<'a> {
+    broker: &'a QuotaBroker,
+    provider: Provider,
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        let mut state = self
+            .broker
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.polling[self.provider as usize] = false;
+    }
+}
+
 pub struct QuotaBroker {
-    config: BrokerConfig,
+    /// Written only with the state lock held, so one decision sees one config.
+    config: RwLock<BrokerConfig>,
     clock: Box<dyn Clock>,
     probe: Box<dyn UsageProbe>,
     fallback: Box<dyn LocalUsageFallback>,
@@ -385,7 +405,7 @@ impl QuotaBroker {
     ) -> Result<Self, InvalidBrokerConfig> {
         config.validate()?;
         Ok(Self {
-            config,
+            config: RwLock::new(config),
             clock,
             probe,
             fallback,
@@ -393,12 +413,25 @@ impl QuotaBroker {
         })
     }
 
+    pub fn config(&self) -> BrokerConfig {
+        *self.config.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Change caps or timing in place. Readings, poll times and reservations
+    /// are kept, so a settings save does not probe early.
+    pub fn set_config(&self, config: BrokerConfig) -> Result<(), InvalidBrokerConfig> {
+        config.validate()?;
+        let _state = self.lock_state();
+        *self.config.write().unwrap_or_else(PoisonError::into_inner) = config;
+        Ok(())
+    }
+
     fn interval(&self, provider: Provider) -> chrono::Duration {
-        chrono::Duration::from_std(self.config.interval(provider)).unwrap()
+        chrono::Duration::from_std(self.config().interval(provider)).unwrap()
     }
 
     fn reservation_ttl(&self) -> chrono::Duration {
-        chrono::Duration::from_std(self.config.reservation_ttl).unwrap()
+        chrono::Duration::from_std(self.config().reservation_ttl).unwrap()
     }
 
     /// The state with expired reservations already dropped. Every access goes
@@ -442,8 +475,13 @@ impl QuotaBroker {
             .filter(|_| !self.is_stale(state, provider, now))
     }
 
-    /// Poll every provider whose interval has elapsed. Returns the providers
-    /// polled. A no-op while orchestration is inactive.
+    /// Poll every provider whose interval has elapsed, in parallel, and block
+    /// until those probes finish. Returns the providers polled. A no-op while
+    /// orchestration is inactive.
+    ///
+    /// Each provider has at most one probe in flight: a concurrent call skips
+    /// it and returns without waiting. The lock is not held while probing, so
+    /// reads see the last data, and each result as soon as it arrives.
     ///
     /// A successful probe drops that provider's reservations that are at least
     /// one poll interval old: the reading has had time to include their usage,
@@ -453,12 +491,13 @@ impl QuotaBroker {
     pub fn poll_due(&self) -> Vec<Provider> {
         let now = self.clock.now();
         let due: Vec<Provider> = {
-            let state = self.lock_state();
+            let mut state = self.lock_state();
             if !state.active {
                 return Vec::new();
             }
-            Provider::ALL
+            let due: Vec<Provider> = Provider::ALL
                 .into_iter()
+                .filter(|p| !state.polling[*p as usize])
                 .filter(|p| {
                     state
                         .providers
@@ -466,37 +505,52 @@ impl QuotaBroker {
                         .and_then(|s| s.last_polled)
                         .is_none_or(|at| now - at >= self.interval(*p))
                 })
-                .collect()
-        };
-        for provider in &due {
-            let result = self.probe.probe(*provider);
-            let fallback = match result {
-                Ok(_) => None,
-                Err(_) => self.fallback.local_fraction(*provider),
-            };
-            let mut state = self.lock_state();
-            if result.is_ok() {
-                let max_age = self.interval(*provider);
-                state
-                    .reservations
-                    .retain(|_, r| r.provider != *provider || now - r.taken_at < max_age);
+                .collect();
+            for provider in &due {
+                state.polling[*provider as usize] = true;
             }
-            let entry = state.providers.entry(*provider).or_default();
-            entry.last_polled = Some(now);
-            match result {
-                Ok(reading) => {
-                    entry.reading = Some(reading);
-                    entry.needs_sign_in = false;
-                    entry.fallback_fraction = None;
-                }
-                Err(error) => {
-                    entry.reading = None;
-                    entry.needs_sign_in = error == ProbeError::NeedsSignIn;
-                    entry.fallback_fraction = fallback;
-                }
+            due
+        };
+        std::thread::scope(|scope| {
+            for provider in &due {
+                scope.spawn(move || self.poll_one(*provider, now));
+            }
+        });
+        due
+    }
+
+    /// Probe one provider outside the lock and apply its result at once.
+    fn poll_one(&self, provider: Provider, now: DateTime<Utc>) {
+        let _flight = Flight {
+            broker: self,
+            provider,
+        };
+        let result = self.probe.probe(provider);
+        let fallback = match result {
+            Ok(_) => None,
+            Err(_) => self.fallback.local_fraction(provider),
+        };
+        let mut state = self.lock_state();
+        if result.is_ok() {
+            let max_age = self.interval(provider);
+            state
+                .reservations
+                .retain(|_, r| r.provider != provider || now - r.taken_at < max_age);
+        }
+        let entry = state.providers.entry(provider).or_default();
+        entry.last_polled = Some(now);
+        match result {
+            Ok(reading) => {
+                entry.reading = Some(reading);
+                entry.needs_sign_in = false;
+                entry.fallback_fraction = None;
+            }
+            Err(error) => {
+                entry.reading = None;
+                entry.needs_sign_in = error == ProbeError::NeedsSignIn;
+                entry.fallback_fraction = fallback;
             }
         }
-        due
     }
 
     /// Reserve `fraction` of a provider for work in flight, so concurrent
@@ -576,7 +630,7 @@ impl QuotaBroker {
     ) -> Decision {
         match policy {
             ProviderQuotaPolicy::PinnedFreeze => match self.dispatchable(state, pinned, now) {
-                Some(fraction) if fits(fraction, cost, self.config.pinned_cap_for(pinned)) => {
+                Some(fraction) if fits(fraction, cost, self.config().pinned_cap_for(pinned)) => {
                     Decision::Dispatch(pinned)
                 }
                 _ => Decision::Freeze {
@@ -589,7 +643,7 @@ impl QuotaBroker {
     }
 
     fn decide_balanced(&self, state: &mut State, cost: f32, now: DateTime<Utc>) -> Decision {
-        let cfg = self.config;
+        let cfg = self.config();
         let mut headroom: Vec<(Provider, f32)> = Provider::ALL
             .into_iter()
             .filter_map(|p| self.dispatchable(state, p, now).map(|f| (p, f)))
@@ -649,7 +703,7 @@ impl QuotaBroker {
         cost: f32,
         now: DateTime<Utc>,
     ) -> Option<DateTime<Utc>> {
-        let cap = self.config.hard_cap_for(provider);
+        let cap = self.config().hard_cap_for(provider);
         let entry = state.providers.get(&provider);
         if entry.is_some_and(|p| p.needs_sign_in) || !fits(0.0, cost, cap) {
             return None;
@@ -703,14 +757,14 @@ impl QuotaBroker {
             .into_iter()
             .filter_map(|p| {
                 let f = state.effective(p)?;
-                (f >= self.config.soft_cap).then(|| format!("{} {:.0}%", p.slug(), f * 100.0))
+                (f >= self.config().soft_cap).then(|| format!("{} {:.0}%", p.slug(), f * 100.0))
             })
             .collect();
         (!parts.is_empty()).then(|| {
             format!(
                 "quota: {} (soft cap {:.0}%)",
                 parts.join(", "),
-                self.config.soft_cap * 100.0
+                self.config().soft_cap * 100.0
             )
         })
     }
@@ -730,6 +784,10 @@ impl QuotaBroker {
                         .unwrap_or_default(),
                     estimated: entry.and_then(|e| e.fallback_fraction),
                     needs_sign_in: entry.is_some_and(|e| e.needs_sign_in),
+                    pending: state.polling[p as usize]
+                        && entry
+                            .is_none_or(|e| e.reading.is_none() && e.fallback_fraction.is_none())
+                        && !entry.is_some_and(|e| e.needs_sign_in),
                 }
             })
             .collect();
@@ -753,8 +811,8 @@ impl QuotaBroker {
             {
                 obj.insert("credit".into(), percent(c));
             }
-            if self.config.provider_hard_caps[p as usize].is_some() {
-                let cap = self.config.hard_cap_for(p);
+            if self.config().provider_hard_caps[p as usize].is_some() {
+                let cap = self.config().hard_cap_for(p);
                 obj.insert("cap".into(), percent(cap));
             }
             if used.is_some() && self.is_stale(&state, p, now) {
@@ -770,8 +828,8 @@ impl QuotaBroker {
         }
         json!({
             "active": state.active,
-            "hard": percent(self.config.hard_cap),
-            "soft": percent(self.config.soft_cap),
+            "hard": percent(self.config().hard_cap),
+            "soft": percent(self.config().soft_cap),
             "providers": providers,
         })
     }
@@ -888,6 +946,61 @@ mod tests {
         assert!((b.effective_fraction(Provider::Antigravity).unwrap() - 0.7).abs() < 1e-6);
         b.release(id);
         assert!((b.effective_fraction(Provider::Antigravity).unwrap() - 0.5).abs() < 1e-6);
+    }
+
+    /// Holds claude's probe until released; the others answer at once.
+    struct SlowClaude {
+        started: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl UsageProbe for SlowClaude {
+        fn probe(&self, p: Provider) -> Result<ProbeReading, ProbeError> {
+            if p == Provider::ClaudeCode {
+                self.started.send(()).unwrap();
+                let release = self.release.lock().unwrap();
+                release.recv_timeout(Duration::from_secs(20)).unwrap();
+            }
+            reading(0.25)
+        }
+    }
+
+    #[test]
+    fn a_slow_probe_blocks_neither_readers_nor_other_providers() {
+        let (started, has_started) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let b = QuotaBroker::new(
+            BrokerConfig::default(),
+            Box::new(SystemClock),
+            Box::new(SlowClaude {
+                started,
+                release: Mutex::new(released),
+            }),
+            Box::new(FakeFallback(None)),
+        )
+        .unwrap();
+        b.set_orchestration_active(true);
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| b.poll_due());
+            has_started.recv_timeout(Duration::from_secs(10)).unwrap();
+            // The others finish while claude is still in flight.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while b.effective_fraction(Provider::Codex).is_none()
+                || b.effective_fraction(Provider::Antigravity).is_none()
+            {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+            // A second poll neither waits nor probes claude again.
+            assert!(b.poll_due().is_empty());
+            assert!(b.status_payload()["providers"]["claude"]["used"].is_null());
+            let pending: Vec<_> = b.headroom().providers.iter().map(|p| p.pending).collect();
+            assert_eq!(pending, [false, true, false]);
+            assert!(!first.is_finished());
+            release.send(()).unwrap();
+            assert_eq!(first.join().unwrap().len(), 3);
+        });
+        assert_eq!(b.effective_fraction(Provider::ClaudeCode), Some(0.25));
+        assert!(b.headroom().providers.iter().all(|p| !p.pending));
     }
 
     #[test]
@@ -1767,7 +1880,7 @@ mod tests {
             });
             for p in Provider::ALL {
                 let fraction = b.effective_fraction(p).unwrap();
-                assert!(fraction <= b.config.hard_cap, "{p:?} {fraction}");
+                assert!(fraction <= b.config().hard_cap, "{p:?} {fraction}");
             }
             // 11 spawns of 1/32 fit in each provider's 0.35 of room.
             assert_eq!(dispatched, 33);

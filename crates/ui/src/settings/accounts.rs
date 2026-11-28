@@ -2006,6 +2006,7 @@ fn broker_provider(
             .collect(),
         estimated,
         needs_sign_in: false,
+        pending: false,
     }
 }
 

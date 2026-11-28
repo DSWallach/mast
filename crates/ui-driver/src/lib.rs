@@ -8,6 +8,7 @@
 mod test_isolation;
 
 pub mod environment;
+mod fake_usage;
 pub mod materialize;
 pub mod scenario;
 pub mod serve;

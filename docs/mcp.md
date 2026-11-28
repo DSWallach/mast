@@ -233,7 +233,9 @@ one line such as `quota: codex 80% (soft cap 78%)`; otherwise it is absent. If
 the broker cannot be built, both are left out and the rest of the reply stands.
 
 Reading `quota_status` probes each provider that is due (at most every 90 s,
-180 s for Antigravity), so a call can wait on the provider's usage service.
+180 s for Antigravity), in parallel, so a call can wait on the slowest usage
+service. A call made while another is probing does not wait for those probes; it
+returns the last data (`used` is `null` before the first reading).
 Probes use the live sign-in on this device and never refresh a token. When one
 fails, `used` is estimated from `token-usage.sqlite3`: the last good reading from
 the past 5 hours, scaled by the growth in that harness's recorded tokens;
