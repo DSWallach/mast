@@ -10,6 +10,10 @@ autotests = false
 name = "engine"
 path = "tests/it/main.rs"
 
+[[test]]
+name = "swr_bench"
+path = "tests/swr_bench.rs"
+
 [features]
 startup-bench = []
 # Seams for the offscreen UI driver; only `mast-ui-driver` enables it.
