@@ -1125,7 +1125,7 @@ mod tests {
         editor.draft.freeze_cap = 0.50;
         assert_eq!(editor.provider_cap_max_percent(), HARD_CAP_MIN_PERCENT);
         // Every notch up to the maximum saves; the one above does not.
-        editor.draft = record(0.40, 0.45, 0.80);
+        editor.draft = record(0.40, 0.70, 0.80);
         let max = editor.provider_cap_max_percent();
         assert_eq!(max, 75);
         editor.set_provider_cap("codex", max);
