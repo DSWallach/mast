@@ -46,12 +46,22 @@ Chats on Antigravity, Grok, Devin, Hermes, Pi and opencode tag a quota error the
 
 ## Cap modes (upcoming)
 
-Cap modes are not active in Mast yet. The quota broker that makes these decisions exists, but nothing calls it, so Mast does not yet poll for it, move work, pause, freeze, save a checkpoint or send a notification.
+Cap modes are not active in Mast yet. The quota broker that makes these decisions exists, but nothing calls it, so Mast does not yet poll for it, move work, pause, freeze, save a checkpoint or send a notification. You can choose the mode and caps now; they are saved and take effect once quota-aware dispatch is on.
+
+### Set the mode and caps
+
+Open **Settings → Accounts** and find **Quota caps**, below the accounts. Caps are how much of a plan dispatched work may use; the rest stays free for your interactive chats.
+
+- **Mode**: **Balanced failover** or **Pinned freeze**.
+- **Soft cap**, **Hard cap** and **Freeze cap**: adjust each in 1% steps. The defaults are 78%, 85% and 90%. The hard cap can be 50% to 95%. The soft cap must stay below the hard cap, and the freeze cap above it (up to 100%). While they don't, the section says why and **Save** is disabled.
+- **Reset to defaults** puts Balanced failover and the default caps back in the controls. Click **Save** to keep them.
+
+Nothing changes until you click **Save**. The device switcher at the top of the page picks whose settings you see and change; switching devices drops unsaved edits, while **Refresh** keeps them. Each device keeps one set of settings per Mast profile. The caps are the same for every provider: there are no per-provider caps yet.
 
 Once connected, it will check each provider's usage every 90 seconds (180 seconds for Antigravity `/usage`) while orchestration is active. It will only read usage and never refresh a single-use sign-in token. If a provider can't be read, it will use an estimate from local token usage. A provider that needs sign-in, or has neither a reading nor an estimate, will get no new work.
 
-- **Balanced failover** (default): new work will be spread by the room each provider has below the 85% hard cap. A provider will keep the work until it reaches the 78% soft cap and another provider below that cap has room. When no provider can take work, orchestration will pause and try again when one may have room.
-- **Pinned freeze**: for pinned projects. Work will never move to another provider. When work would pass 90%, or the provider's usage can't be trusted, Mast will freeze, save a checkpoint and notify you.
+- **Balanced failover** (default): new work will be spread by the room each provider has below the hard cap. A provider will keep the work until it reaches the soft cap and another provider below that cap has room. When no provider can take work, orchestration will pause and try again when one may have room.
+- **Pinned freeze**: for pinned projects. Work will never move to another provider. When work would pass the freeze cap, or the provider's usage can't be trusted, Mast will freeze, save a checkpoint and notify you.
 
 ## Antigravity account homes
 
