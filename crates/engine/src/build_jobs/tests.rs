@@ -709,6 +709,16 @@ fn local_job(chat: &str, script: &str) -> NewJob {
     }
 }
 
+#[test]
+fn log_slice_is_positional_and_wakes_require_a_waiter() {
+    let (_dir, jobs, _) = local_fixture();
+    let job = jobs.enqueue(local_job("owner", "fixture")).unwrap().job;
+    std::fs::write(&job.log_path, b"0123456789").unwrap();
+    assert_eq!(jobs.log_slice(&job, 3, 4).unwrap(), ("3456".into(), 7));
+    assert!(jobs.arm_wake(&job.id, "other").is_err());
+    assert!(jobs.arm_wake(&job.id, "owner").is_ok());
+}
+
 fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while !done() {

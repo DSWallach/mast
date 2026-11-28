@@ -14,13 +14,19 @@ use crate::CreateChatForWorkItemParams;
 pub const MAX_DISPATCH_EVIDENCE_BYTES: usize = 4096;
 
 /// A worker's typed completion, sent beside its `report_to_parent` text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportCompletion {
     /// The commit the worker tested: 7 to 64 hex digits.
     pub tested_sha: String,
     /// What was run and what it showed.
     pub evidence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changelog_fragment_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub doc_delta_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<String>,
 }
 
 impl ReportCompletion {
@@ -39,7 +45,9 @@ impl ReportCompletion {
         while !evidence.is_char_boundary(end) {
             end -= 1;
         }
-        Ok(Self { tested_sha: sha, evidence: evidence[..end].to_owned() })
+        Ok(Self { tested_sha: sha, evidence: evidence[..end].to_owned(),
+            changelog_fragment_path: self.changelog_fragment_path.clone(),
+            doc_delta_paths: self.doc_delta_paths.clone(), artifact_refs: self.artifact_refs.clone() })
     }
 }
 
@@ -128,17 +136,29 @@ mod tests {
 
     #[test]
     fn completion_is_normalized() {
-        let ok = ReportCompletion { tested_sha: " ABCDEF1 ".into(), evidence: " ok ".into() };
+        let ok = ReportCompletion { tested_sha: " ABCDEF1 ".into(), evidence: " ok ".into(), ..Default::default() };
         let ok = ok.normalized().unwrap();
         assert_eq!((ok.tested_sha.as_str(), ok.evidence.as_str()), ("abcdef1", "ok"));
         for bad in ["", "abc", "xyzxyzxyz", &"a".repeat(65)] {
-            let c = ReportCompletion { tested_sha: bad.into(), evidence: "e".into() };
+            let c = ReportCompletion { tested_sha: bad.into(), evidence: "e".into(), ..Default::default() };
             assert!(c.normalized().is_err(), "{bad}");
         }
-        let c = ReportCompletion { tested_sha: "abcdef1".into(), evidence: "  ".into() };
+        let c = ReportCompletion { tested_sha: "abcdef1".into(), evidence: "  ".into(), ..Default::default() };
         assert!(c.normalized().is_err());
-        let c = ReportCompletion { tested_sha: "abcdef1".into(), evidence: "é".repeat(3000) };
+        let c = ReportCompletion { tested_sha: "abcdef1".into(), evidence: "é".repeat(3000), ..Default::default() };
         assert!(c.normalized().unwrap().evidence.len() <= MAX_DISPATCH_EVIDENCE_BYTES);
+    }
+
+    #[test]
+    fn completion_pointers_survive_normalization_and_wire_roundtrip() {
+        let input = serde_json::json!({
+            "testedSha": "abcdef1", "evidence": "passed",
+            "changelogFragmentPath": "docs/changelog.d/task.md",
+            "docDeltaPaths": [".mast/artifacts/project/deltas/task.md"],
+            "artifactRefs": ["mast-artifact:123"]
+        });
+        let completion: ReportCompletion = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(serde_json::to_value(completion.normalized().unwrap()).unwrap(), input);
     }
 
     #[test]

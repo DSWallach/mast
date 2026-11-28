@@ -27,7 +27,7 @@ If your role changes, request tools/list again for the current catalog.";
 
 /// The tools a Worker's catalog lists, in catalog order. `mast-mcp` serves the
 /// schemas; the context packet names them.
-pub const WORKER_TOOL_NAMES: [&str; 19] = [
+pub const WORKER_TOOL_NAMES: [&str; 23] = [
     "whoami",
     "get_chat",
     "read_chat",
@@ -41,12 +41,24 @@ pub const WORKER_TOOL_NAMES: [&str; 19] = [
     tools::ARTIFACT_GET_PLAN,
     tools::CONTEXT_READ_SLICE,
     tools::ARTIFACT_RENDER_CHECK,
-    tools::REVIEW_PUBLISH,
+    "build_enqueue",
+    "build_status",
+    "build_wait",
+    "build_log",
+    "build_cancel",
     tools::BIND_CHAT_WORKTREE,
     tools::REPORT_FRICTION,
     tools::RUN_COMMAND,
     tools::COMMAND_STATUS,
     tools::AWAIT_BACKGROUND,
+];
+
+/// Verifiers have a read-oriented catalog and can publish their review.
+pub const VERIFIER_TOOL_NAMES: [&str; 13] = [
+    "whoami", "get_chat", "read_chat", "report_to_parent", tools::READ_CURRENT,
+    tools::ARTIFACT_GET_PLAN, tools::ARTIFACT_RENDER_CHECK, tools::REVIEW_GET,
+    tools::REVIEW_PUBLISH, tools::CONTEXT_READ_SLICE, "build_status", "build_log",
+    tools::REPORT_FRICTION,
 ];
 
 /// Catalog description of `context_read_slice`.

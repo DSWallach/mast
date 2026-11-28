@@ -18,6 +18,27 @@ pub(crate) struct CommandSegment {
     pub pipeline_input: bool,
 }
 
+/// Validate the deliberately small command surface accepted by the build queue.
+/// The queue executes an argv directly; it never accepts a shell command line.
+pub(crate) fn validate_build_argv(argv: &[String]) -> Result<(), &'static str> {
+    if argv.is_empty() || argv.iter().any(|arg| {
+        arg.is_empty() || arg.chars().any(|c| c == '\0' || c == '\n' || c == '\r')
+            || matches!(arg.as_str(), "|" | "||" | "&&" | ";" | "&" | ">" | ">>" | "<")
+    }) {
+        return Err("build command must be a nonempty argv without shell operators");
+    }
+    let allowed = match argv[0].as_str() {
+        "cargo" => matches!(argv.get(1).map(String::as_str),
+            Some("test" | "nextest" | "build" | "check" | "clippy")),
+        "scripts/ui-preview.sh" | "scripts/ui-flow.sh" => true,
+        _ => false,
+    };
+    if !allowed {
+        return Err("unsupported build command");
+    }
+    Ok(())
+}
+
 /// Strip only wrappers whose entire behavior is known. Keep assignments for
 /// safety checks and for rules that require isolated configuration directories.
 pub(crate) fn normalize_segment(segment: &CommandSegment) -> Option<(Vec<String>, Vec<String>)> {
@@ -962,6 +983,18 @@ fn outside_quotes(prefix: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn build_argv_is_restricted_to_reviewed_direct_commands() {
+        for words in [vec!["cargo", "test", "-p", "mast-engine"],
+            vec!["cargo", "nextest", "run"], vec!["scripts/ui-flow.sh", "--help"]] {
+            assert!(validate_build_argv(&words.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_ok());
+        }
+        for words in [vec!["sh", "-c", "cargo test"], vec!["cargo", "run"],
+            vec!["cargo", "test", "|", "cat"], vec!["/usr/bin/cargo", "test"]] {
+            assert!(validate_build_argv(&words.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
+        }
+    }
 
     #[test]
     fn separates_shell_segments_without_splitting_quoted_arguments() {

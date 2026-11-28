@@ -768,6 +768,33 @@ impl BuildJobs {
             .ok_or_else(|| BuildJobError::NotFound(job_id.into()))
     }
 
+    /// Read a bounded byte window of a job's local log. Callers must authorize the job first.
+    pub fn log_slice(&self, job: &Job, offset: u64, max_bytes: usize) -> Result<(String, u64), BuildJobError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = match std::fs::File::open(&job.log_path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((String::new(), offset)),
+            Err(error) => return Err(store_error(error)),
+        };
+        file.seek(SeekFrom::Start(offset)).map_err(store_error)?;
+        let mut bytes = Vec::new();
+        file.take(max_bytes.clamp(1, 64 * 1024) as u64).read_to_end(&mut bytes).map_err(store_error)?;
+        let next = offset.saturating_add(bytes.len() as u64);
+        Ok((String::from_utf8_lossy(&bytes).into_owned(), next))
+    }
+
+    pub fn arm_wake(&self, job_id: &str, chat_id: &str) -> Result<(), BuildJobError> {
+        if !self.inner.store.arm_wake(job_id, chat_id)? {
+            return Err(BuildJobError::Invalid("chat does not own this build job".into()));
+        }
+        self.inner.notify.notify_one();
+        Ok(())
+    }
+
+    pub fn is_waiter(&self, job_id: &str, chat_id: &str) -> Result<bool, BuildJobError> {
+        self.inner.store.is_waiter(job_id, chat_id)
+    }
+
     pub fn list(&self, filter: &ListFilter) -> Result<Vec<Job>, BuildJobError> {
         self.inner.store.list(filter)
     }

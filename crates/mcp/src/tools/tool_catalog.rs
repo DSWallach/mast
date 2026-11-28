@@ -141,6 +141,9 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                         "description": "The commit you tested and what the tests showed. Starts one review of that commit.",
                         "properties": {
                             "testedSha": { "type": "string", "description": "The tested commit, 7 to 64 hex digits." },
+                            "changelogFragmentPath": { "type": "string" },
+                            "docDeltaPaths": { "type": "array", "items": { "type": "string" } },
+                            "artifactRefs": { "type": "array", "items": { "type": "string" } },
                             "evidence": { "type": "string", "description": "What was run and the result." }
                         },
                         "required": ["testedSha", "evidence"]
@@ -777,6 +780,31 @@ pub(super) fn friction_catalog() -> Vec<ToolDef> {
             input_schema: json!({"type":"object", "properties": {"id":{"type":"string"}, "reason":{"type":"string","maxLength":1000}}, "required":["id","reason"]}),
         },
         ToolDef {
+            name: "build_enqueue",
+            description: "Queue a validated build argv; unmatched Space rules require approval.",
+            input_schema: json!({"type":"object","properties":{"idempotencyKey":{"type":"string"},"argv":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string"},"headSha":{"type":"string"},"host":{"type":"string"},"label":{"type":"string"},"wake":{"type":"boolean"},"integration":{"type":"boolean"}},"required":["idempotencyKey","argv"]}),
+        },
+        ToolDef {
+            name: "build_status", description: "Read a build job's state and queue position.",
+            input_schema: json!({"type":"object","properties":{"jobId":{"type":"string"}},"required":["jobId"]}),
+        },
+        ToolDef {
+            name: "build_list", description: "List build jobs visible to this chat.",
+            input_schema: json!({"type":"object","properties":{"activeOnly":{"type":"boolean"},"limit":{"type":"integer"}}}),
+        },
+        ToolDef {
+            name: "build_wait", description: "Register a wake when a build job finishes.",
+            input_schema: json!({"type":"object","properties":{"jobId":{"type":"string"}},"required":["jobId"]}),
+        },
+        ToolDef {
+            name: "build_log", description: "Read a bounded positional slice of a build log.",
+            input_schema: json!({"type":"object","properties":{"jobId":{"type":"string"},"offset":{"type":"integer","minimum":0},"maxBytes":{"type":"integer","minimum":1}},"required":["jobId"]}),
+        },
+        ToolDef {
+            name: "build_cancel", description: "Cancel a build job this chat owns.",
+            input_schema: json!({"type":"object","properties":{"jobId":{"type":"string"}},"required":["jobId"]}),
+        },
+        ToolDef {
             name: agent_tool_names::RUN_COMMAND,
             description: "Start a long command (a test suite, build or preview) on the engine, or attach to it when `idempotencyKey` was already used by this chat. Returns at once with the run's log path. When the command exits, the engine wakes this chat exactly once with the exit code, the log path and a short failure summary, so end your turn instead of polling. Only commands the user's permission rules allow run, unless the chat auto-approves or its harness never asks for approval (Cursor), where any command not denied by a rule runs; a read-only chat is refused. To wait for a job on another host, run `scripts/remote-cargo.sh wait <host> <name> <minutes>` (or `ssh`) here: the wake carries the trimmed result, and a timeout (exit 124) or ssh failure (255) is explained in a Note. A chat may have four commands running at once. Use `command_status` for the current state. Output goes to the log file, not the chat (capped: older output is rotated out of very long logs).",
             input_schema: json!({"type":"object", "properties": {
@@ -846,13 +874,16 @@ pub(crate) enum ToolCatalogProfile {
     Compact,
 }
 
-const WORKER_TOOLS: [&str; 19] = mast_proto::context_slice::WORKER_TOOL_NAMES;
+const WORKER_TOOLS: [&str; 23] = mast_proto::context_slice::WORKER_TOOL_NAMES;
 
 pub(crate) fn worker_catalog(role: Option<AgentRoleProfile>) -> bool {
     role == Some(AgentRoleProfile::Worker)
 }
 
 pub(crate) fn tool_visible(role: Option<AgentRoleProfile>, name: &str) -> bool {
+    if role == Some(AgentRoleProfile::Verifier) {
+        return mast_proto::context_slice::VERIFIER_TOOL_NAMES.contains(&name);
+    }
     match name {
         // Declared once in `work_outline_catalog`; visible to coordinators only.
         "quota_status" => matches!(

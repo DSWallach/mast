@@ -431,6 +431,15 @@ impl Store {
         })
     }
 
+    /// Arm a wake only for a chat already attached to this job. The single SQL update
+    /// handles a completion racing with registration.
+    pub fn arm_wake(&self, job_id: &str, chat_id: &str) -> Result<bool, BuildJobError> {
+        self.with(|c| c.execute(
+            "UPDATE waiters SET wake=1, wake_state=CASE WHEN wake_state='none' AND EXISTS (SELECT 1 FROM jobs WHERE id=?1 AND state NOT IN ('awaiting_approval','queued','running')) THEN 'pending' ELSE wake_state END WHERE job_id=?1 AND chat_id=?2",
+            params![job_id, chat_id],
+        ).map(|n| n > 0))
+    }
+
     pub fn approve(&self, id: &str) -> Result<Job, BuildJobError> {
         let changed = self.with(|c| {
             c.execute(

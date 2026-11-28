@@ -424,6 +424,15 @@ mod catalog_tests {
     }
 
     #[tokio::test]
+    async fn build_tool_schemas_stay_small() {
+        let tools = agent_tools(Arc::new(CatalogEngine::default()));
+        for tool in tools.list().into_iter().filter(|t| t.name.starts_with("build_")) {
+            let bytes = json!({"name":tool.name,"description":tool.description,"inputSchema":tool.input_schema}).to_string().len();
+            assert!(bytes < 600, "{}: {bytes} bytes", tool.name);
+        }
+    }
+
+    #[tokio::test]
     async fn worker_catalog_keeps_contracts_and_refreshes_roles_on_list_and_call() {
         let engine = Arc::new(CatalogEngine::default());
         let tools = agent_tools(engine.clone());
@@ -445,7 +454,7 @@ mod catalog_tests {
         }
         let response = request("tools/list", json!({})).await;
         let listed = response["result"]["tools"].as_array().unwrap();
-        assert_eq!(listed.len(), 19);
+        assert_eq!(listed.len(), 23);
         assert!(listed.iter().any(|tool| tool["name"] == "context_read_slice"));
         let bind = listed
             .iter()
@@ -480,7 +489,6 @@ mod catalog_tests {
 
         for role in [
             None,
-            Some(AgentRoleProfile::Verifier),
             Some(AgentRoleProfile::Admin),
         ] {
             *engine.role.lock().unwrap() = role;
@@ -500,6 +508,12 @@ mod catalog_tests {
                 );
             }
         }
+        *engine.role.lock().unwrap() = Some(AgentRoleProfile::Verifier);
+        let response = request("tools/list", json!({})).await;
+        let listed = response["result"]["tools"].as_array().unwrap();
+        assert_eq!(listed.len(), mast_proto::context_slice::VERIFIER_TOOL_NAMES.len());
+        assert!(!listed.iter().any(|tool| tool["name"] == "create_chat"));
+        assert!(listed.iter().any(|tool| tool["name"] == "build_log"));
     }
 
     #[tokio::test]
