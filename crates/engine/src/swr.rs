@@ -152,24 +152,34 @@ where
 
     fn finish(&self, key: &str, id: u64, result: Result<V, E>) -> Result<Entry<V>, E> {
         // Everything that allocates or frees in bulk happens off the lock: the
-        // stored copy is built before it is taken and the replaced entry is
+        // stored copy is built before the lock is retaken and the replaced entry is
         // dropped after it is released, so readers only wait for map updates.
-        let prepared = result.map(|value| {
-            let entry = Entry {
+        // A fetch that is no longer the key's current one stores nothing, so it
+        // is found out first and never pays for the deep clone.
+        let is_current = |state: &State<V, E>| state.inflight.get(key).is_some_and(|(i, _)| *i == id);
+        let stale = !is_current(&self.lock());
+        let entry = match result {
+            Ok(value) => Entry {
                 fetched_at: Utc::now(),
                 value,
-            };
-            (Arc::new(entry.clone()), entry)
-        });
-        let mut state = self.lock();
-        let current = state.inflight.get(key).is_some_and(|(i, _)| *i == id);
-        if current {
-            state.inflight.remove(key);
-        }
-        let (stored, entry) = prepared?;
-        if !current {
+            },
+            Err(error) => {
+                let mut state = self.lock();
+                if is_current(&state) {
+                    state.inflight.remove(key);
+                }
+                return Err(error);
+            }
+        };
+        if stale {
             return Ok(entry);
         }
+        let stored = Arc::new(entry.clone());
+        let mut state = self.lock();
+        if !is_current(&state) {
+            return Ok(entry);
+        }
+        state.inflight.remove(key);
         let replaced = state.entries.insert(key.to_owned(), stored);
         let snapshot = persist_snapshot(&state);
         drop(state);
