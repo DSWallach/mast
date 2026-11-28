@@ -2077,8 +2077,12 @@ mod tests {
             .iter()
             .find(|(method, _)| method == methods::SET_QUOTA_SETTINGS)
             .expect("a save was sent");
-        assert_eq!(params["providerHardCaps"], serde_json::json!({ "codex": 0.8 }));
-        assert_eq!(params["hardCap"], 0.85, "the global cap is untouched");
+        // Caps travel as f32, so compare as the f32s they are.
+        let as_f32 = |value: &serde_json::Value| value.as_f64().unwrap() as f32;
+        let overrides = params["providerHardCaps"].as_object().unwrap();
+        assert_eq!(overrides.keys().collect::<Vec<_>>(), ["codex"]);
+        assert_eq!(as_f32(&overrides["codex"]), 0.8);
+        assert_eq!(as_f32(&params["hardCap"]), 0.85, "the global cap is untouched");
     }
 
     #[test]
