@@ -99,7 +99,18 @@ When a Lead reports to the Manager, Mast sends a *Lead digest*: the first part o
 
 A Lead hands off like any other chat (`hand_off_orchestrator`). The successor takes over the Lead role for the same item, stays read-only under the same Manager, and its Workers follow it. A hand-off does not count as a new Lead.
 
-Only local Leads (on the Manager's device) are supported today. A Lead on a paired device is planned.
+### A Lead on a paired device
+
+A Lead can run on a paired device (for example the desktop). On the paired device's Mast MCP server, start it with `create_chat`, `standingRole: lead`, `parent` set to your Manager chat, `leadItemId` set to the slice's work item on your device, and optionally `leadOwnedPaths`. The paired device must be on a build that advertises `lead-tier-v1`; an older one is refused instead of running the Lead as a plain chat.
+
+The same rules hold, split between the two devices:
+
+- The paired device refuses a fifth Lead of one Manager (archived Leads free their slot) and a Lead whose `leadOwnedPaths` overlap another's. It runs the Lead read-only, caps its Workers at six and depth at two, and lets it reach only its own Workers.
+- Its report crosses the link as a Lead digest, and your device bounds it again if a sender left it whole. Your device, which sees every Lead of the project, adds a `[Lead tier warning: ...]` line when the project is over its four Leads or the Lead's item `ownedPaths` overlap another Lead's lease. It does not refuse a digest, so you hear what the Lead has to say.
+- A Worker of a Lead never reports to the Manager, even after its Lead is archived.
+- A Lead whose work item is Completed frees its slot and lease even if its chat is not archived. A report sent with a completion reads `status: Done`.
+
+Scheduled runs on an item inside a Lead's slice are not routed through the Lead: a scheduled run is a standalone chat with no parent, so it is not one of the Lead's Workers and does not count against its six. Its result is read from the task's own output.
 
 ## Queue wakes
 

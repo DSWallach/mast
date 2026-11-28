@@ -217,6 +217,13 @@ struct CreateChatArgs {
     /// `"lead"`: start the child as a Lead of `workItemId` (Manager only).
     #[serde(default, alias = "standingRole")]
     standing_role: Option<String>,
+    /// A Lead started on a paired device: the work item it is for, in the
+    /// caller's own registry (the device keeps it as an opaque id).
+    #[serde(default, alias = "leadItemId")]
+    lead_item_id: Option<String>,
+    /// The paths that Lead's lease covers (checked against its other Leads).
+    #[serde(default, alias = "leadOwnedPaths")]
+    lead_owned_paths: Vec<String>,
     project: Option<String>,
     device: Option<String>,
     parent: Option<String>,
@@ -1234,8 +1241,28 @@ impl Tools {
             model: args.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned),
             account_id: args.account_id.as_deref().map(str::trim).filter(|a| !a.is_empty()).map(str::to_owned),
         };
+        // A Lead on a paired device has no work item there: its item is the
+        // caller's own, and the device needs the Manager's chat as parent.
+        let peer_lead = match args.standing_role.as_deref().map(str::trim) {
+            Some("lead") if self.zeron.is_peer() => {
+                let item = args.lead_item_id.as_deref().map(str::trim).filter(|i| !i.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("a Lead on a paired device needs leadItemId (its work item on your device)"))?;
+                if explicit_parent.is_none() {
+                    anyhow::bail!("a Lead on a paired device needs parent (your Manager chat)");
+                }
+                let local = self.zeron.local_device_id().await?;
+                let supported = self.zeron.devices().await?.iter()
+                    .any(|d| d.id == local && d.supports(mast_proto::capabilities::LEAD_TIER_V1));
+                if !supported {
+                    anyhow::bail!("the paired device is too old to run a Lead (it lacks lead-tier-v1); update it first");
+                }
+                Some(item.to_owned())
+            }
+            _ => None,
+        };
         let lead = match args.standing_role.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
             None => false,
+            Some("lead") if peer_lead.is_some() => false,
             Some("lead") if work_item_id.is_some() => true,
             Some("lead") => anyhow::bail!("standingRole lead needs a workItemId"),
             Some(other) => anyhow::bail!("standingRole must be \"lead\", not {other:?}"),
@@ -1398,6 +1425,12 @@ impl Tools {
             }
             if let Some(parent) = &parent_chat_id {
                 mutate["parentChatId"] = json!(parent);
+            }
+            if let Some(item) = &peer_lead {
+                mutate["leadItemId"] = json!(item);
+                if !args.lead_owned_paths.is_empty() {
+                    mutate["leadOwnedPaths"] = json!(args.lead_owned_paths);
+                }
             }
             if let Some(branch) = args
                 .branch

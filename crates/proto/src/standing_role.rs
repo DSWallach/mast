@@ -289,6 +289,10 @@ pub enum LeadDigestStatus {
     InProgress,
     Blocked,
     Done,
+    /// A status a newer peer sent that this build does not know. Declared
+    /// last because `#[serde(other)]` must sit on the last variant.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The only thing a Manager hears from a Lead's subtree. Built by the engine
@@ -450,5 +454,27 @@ mod tests {
         assert_eq!(digest.status, LeadDigestStatus::InProgress);
         let packet: LeadContextPacket = serde_json::from_str("{}").unwrap();
         assert!(packet.owned_paths.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod peer_compat_tests {
+    use super::*;
+
+    #[test]
+    fn a_digest_status_from_a_newer_peer_reads_as_unknown_not_an_error() {
+        let digest: LeadDigest = serde_json::from_str(r#"{"leadItemId":"i","status":"someFutureStatus"}"#).unwrap();
+        assert_eq!(digest.status, LeadDigestStatus::Unknown);
+        let done: LeadDigest = serde_json::from_str(r#"{"status":"done"}"#).unwrap();
+        assert_eq!(done.status, LeadDigestStatus::Done);
+    }
+
+    #[test]
+    fn a_report_from_a_peer_without_the_lead_field_still_reads() {
+        let old = r#"{"id":"r","chatId":"c","parentChatId":"p","text":"t","createdAtMs":1}"#;
+        let item: crate::peer_link::PeerReportItem = serde_json::from_str(old).unwrap();
+        assert_eq!(item.lead_item_id, None);
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(!json.contains("leadItemId"), "an old receiver sees no new field: {json}");
     }
 }

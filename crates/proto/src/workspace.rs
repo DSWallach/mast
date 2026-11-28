@@ -135,6 +135,13 @@ pub mod capabilities {
     pub const MESSAGE_QUEUE_ID_REPLAY_V1: &str = "message-queue-id-replay-v1";
     /// Replies addressed only to the original live question resolver.
     pub const RESPOND_SCOPED_LIVE_INPUT_V1: &str = "respond-scoped-live-input-v1";
+    /// The host runs the Lead tier: a Lead started there (a work-item launch,
+    /// or a chat a paired Manager made with a `leadItemId`) is read-only,
+    /// counts against the Lead and Worker limits, and reports to its Manager
+    /// as a bounded digest. An older host would run it as a plain chat whose
+    /// whole report reaches the Manager, so a Lead is only placed on a host
+    /// that advertises it.
+    pub const LEAD_TIER_V1: &str = "lead-tier-v1";
 
     /// Per-harness token: `work-outline-instruction-envelope-v1/<harness>`,
     /// where `<harness>` is the harness id's wire spelling (`claude-code`,
@@ -185,6 +192,7 @@ pub mod capabilities {
         MANAGER_ROLE_V1,
         MESSAGE_QUEUE_ID_REPLAY_V1,
         RESPOND_SCOPED_LIVE_INPUT_V1,
+        LEAD_TIER_V1,
     ];
 
     pub fn current() -> Vec<String> {

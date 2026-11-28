@@ -519,3 +519,108 @@ async fn an_ask_ceiling_peer_cannot_approve_a_workers_command_via_respond_to_inp
 
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;
+
+impl Rig {
+    /// A Lead the Manager starts on B (it has no work item there): the id of its
+    /// item on A, the paths its lease covers.
+    async fn start_lead(&self, tools: &Tools, item: &str, paths: &[&str]) -> Result<String, String> {
+        let created = tools
+            .call(
+                "create_chat",
+                json!({ "project": SPACE_B, "parent": MANAGER, "standingRole": "lead", "leadItemId": item,
+                        "leadOwnedPaths": paths, "title": format!("Lead {item}"), "harness": "claude-code" }),
+            )
+            .await?;
+        Ok(created["chatId"].as_str().unwrap().to_string())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_hosted_lead_is_read_only_reports_a_digest_and_keeps_to_its_subtree() {
+    let rig = Rig::start(true).await;
+    let tools = rig.manager_tools();
+    let lead = rig.start_lead(&tools, "item-slice", &["crates/a/**"]).await.unwrap();
+    // Read-only on B whatever the Manager asked for.
+    let row = rig.b.workspace.chat(&lead).unwrap().unwrap();
+    assert_eq!(row.config.unwrap().sandbox, mast_proto::SandboxLevel::ReadOnly);
+
+    // Its Workers live on B and answer to it; it reaches them and nothing else.
+    let (lead_tools, _lease) = rig.worker_tools(&lead);
+    let mut workers = Vec::new();
+    for n in 0..mast_proto::MAX_WORKERS_PER_LEAD {
+        let made = lead_tools.call("create_chat", json!({ "idempotencyKey": format!("w{n}"), "title": format!("leaf {n}") })).await.unwrap();
+        assert_eq!(made["parentChatId"], lead.as_str());
+        workers.push(made["chatId"].as_str().unwrap().to_string());
+    }
+    let seventh = lead_tools.call("create_chat", json!({ "idempotencyKey": "w-extra", "title": "one too many" })).await.unwrap_err();
+    assert!(seventh.contains("already has 6 Workers"), "{seventh}");
+    lead_tools.call("read_chat", json!({ "chat": workers[0] })).await.unwrap();
+    assert!(lead_tools.call("read_chat", json!({ "chat": "client-work" })).await.is_err(), "a sibling chat on B is outside the Lead's subtree");
+    assert!(lead_tools.call("send_message", json!({ "chat": "client-work", "text": "hi" })).await.is_err());
+
+    // A Worker of a Worker would be depth 3.
+    let (leaf_tools, _leaf_lease) = rig.worker_tools(&workers[0]);
+    let deeper = leaf_tools.call("create_chat", json!({ "idempotencyKey": "deep", "title": "too deep" })).await.unwrap_err();
+    assert!(deeper.contains("depth 3 is over the limit of 2"), "{deeper}");
+
+    // Its report crosses the link as a digest; the leaf's words never do.
+    let long = format!("Slice merged on fedora.\n{}", "internal detail ".repeat(3_000));
+    let sent = lead_tools.call("report_to_parent", json!({ "text": long })).await.unwrap();
+    assert_eq!(sent["sent"]["delivery"], "queuedForRemoteParent");
+    assert_eq!(sent["sent"]["truncated"], true);
+    let update = rig.wait_for_manager_update("[Lead digest, item item-slice").await;
+    assert!(update.contains("Slice merged on fedora."), "{update}");
+    assert!(update.len() < 3_000, "{} bytes", update.len());
+    let (leaf_report, _) = (leaf_tools.call("report_to_parent", json!({ "text": "LEAF-NOISE tests green" })).await, ());
+    leaf_report.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    rig.a.orchestrator_wakes.deliver_now(MANAGER).await;
+    assert!(rig.manager_updates().iter().all(|u| !u.contains("LEAF-NOISE")), "the Manager hears only the digest: {:?}", rig.manager_updates());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_hosted_lead_marks_a_completed_report_done() {
+    let rig = Rig::start(true).await;
+    let tools = rig.manager_tools();
+    let lead = rig.start_lead(&tools, "item-done", &[]).await.unwrap();
+    let (lead_tools, _lease) = rig.worker_tools(&lead);
+    lead_tools
+        .call("report_to_parent", json!({ "text": "Slice finished.", "completion": { "testedSha": "abcdef1", "evidence": "suite green" } }))
+        .await
+        .unwrap();
+    let update = rig.wait_for_manager_update("[Lead digest, item item-done").await;
+    assert!(update.contains("status: Done"), "{update}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_leads_are_limited_to_four_per_manager_and_never_share_paths() {
+    let rig = Rig::start(true).await;
+    let tools = rig.manager_tools();
+    let mut leads = Vec::new();
+    for n in 0..mast_proto::MAX_LEADS_PER_PROJECT {
+        leads.push(rig.start_lead(&tools, &format!("item-{n}"), &[&format!("crates/p{n}/**")]).await.unwrap());
+    }
+    let fifth = rig.start_lead(&tools, "item-4", &["crates/p4/**"]).await.unwrap_err();
+    assert!(fifth.contains("already has 4 Leads"), "{fifth}");
+    // Archiving one frees its slot; its lease is then free too.
+    rig.b.workspace.set_chat_archived(&leads[0], true).unwrap();
+    let overlap = rig.start_lead(&tools, "item-5", &["crates/p1/src"]).await.unwrap_err();
+    assert!(overlap.contains("Lead subtree lease"), "{overlap}");
+    rig.start_lead(&tools, "item-6", &["crates/fresh/**"]).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lead_needs_its_manager_as_parent_on_a_peer() {
+    let rig = Rig::start(true).await;
+    let tools = rig.manager_tools();
+    let refused = tools
+        .call("create_chat", json!({ "project": SPACE_B, "standingRole": "lead", "leadItemId": "item-x", "harness": "claude-code" }))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("parent"), "{refused}");
+    let refused = tools
+        .call("create_chat", json!({ "project": SPACE_B, "parent": MANAGER, "standingRole": "lead", "harness": "claude-code" }))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("leadItemId"), "{refused}");
+}

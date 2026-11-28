@@ -1400,6 +1400,19 @@ impl EngineRpc {
                     capability: mast_proto::capabilities::STANDING_ROLE_LAUNCH_V1.into(),
                 }));
             }
+            // An older owner would run a Lead as a plain chat: writable, and
+            // reporting its whole report to the Manager.
+            if p.standing_role == Some(mast_proto::StandingRoleKind::Lead) {
+                if !device.supports(mast_proto::capabilities::LEAD_TIER_V1) {
+                    return Err(blocked(ExecutionValidationError::HostUnsupported {
+                        device_id: owner,
+                        capability: mast_proto::capabilities::LEAD_TIER_V1.into(),
+                    }));
+                }
+                // The Manager's device sees every Lead of the project: check
+                // the count and the lease here before the owner is asked.
+                self.launch.precheck_lead(&p).await.map_err(fail)?;
+            }
             // An older owner would run a Manager unrestricted and without its role.
             if p.standing_role == Some(mast_proto::StandingRoleKind::Manager)
                 && !device.supports(mast_proto::capabilities::MANAGER_ROLE_V1)
@@ -1830,10 +1843,17 @@ impl EngineRpc {
                 let parent_chat_id = parent_chat_id.filter(|p| !p.trim().is_empty());
                 // A plain child under a Lead is a Worker like any other: the
                 // depth and 6-Worker caps hold for every way of making one.
-                if let Some(parent) = parent_chat_id.as_deref() {
-                    crate::lead_role::admit_child(&self.workspace, parent, &chat_id)
-                        .map_err(|refusal| RpcError::Failed(refusal.to_string()))?;
-                }
+                // The count and the create are one step under the launch gate, so
+                // two parallel creates cannot both take a Lead's last slot.
+                let lead_gate = match parent_chat_id.as_deref() {
+                    Some(parent) => {
+                        let gate = self.launch.lock_gate().await;
+                        crate::lead_role::admit_child(&self.workspace, parent, &chat_id)
+                            .map_err(|refusal| RpcError::Failed(refusal.to_string()))?;
+                        Some(gate)
+                    }
+                    None => None,
+                };
                 // A child of a bound Chat in the same Space starts in the
                 // parent's execution root by default (acceptance 19), so it
                 // can inherit the binding; an explicit other cwd opts out of
@@ -1857,6 +1877,7 @@ impl EngineRpc {
                         parent_chat_id.clone(),
                     )
                     .map_err(failed)?;
+                drop(lead_gate);
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
                     self.workspace
                         .set_chat_branch(&chat_id, branch)

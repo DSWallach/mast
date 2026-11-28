@@ -131,6 +131,12 @@ pub struct PeerReportItem {
     pub parent_chat_id: String,
     pub text: String,
     pub created_at_ms: i64,
+    /// Set when the reporting chat is a Lead (`leadItemId` it was created
+    /// with): `text` is then already a bounded Lead digest, and the receiver
+    /// bounds it again if a sender left it whole. Absent from a sender that
+    /// predates the Lead tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

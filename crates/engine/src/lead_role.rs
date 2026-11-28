@@ -27,6 +27,9 @@ pub struct ChatNode {
     pub parent: Option<String>,
     /// The standing role the chat holds now, if any.
     pub role: Option<StandingRoleKind>,
+    /// The chat's parent is a Manager on a paired device, so it is not in
+    /// the chain but still counts one level of depth.
+    pub remote_parent: bool,
 }
 
 /// Why a Lead-tier launch is refused. `Display` is the message the caller sees.
@@ -122,7 +125,8 @@ pub fn check_worker_parent(
     if !parent_is_lead && !lead_above {
         return Ok(None);
     }
-    let depth = chain.len() + 1;
+    let remote = parent_node.remote_parent || chain.iter().any(|(_, n)| n.remote_parent);
+    let depth = chain.len() + 1 + usize::from(remote);
     if depth > usize::from(MAX_LEAD_HIERARCHY_DEPTH) {
         return Err(LeadRefusal::TooDeep { depth });
     }
@@ -135,9 +139,14 @@ pub fn check_worker_parent(
 /// The policy's view of a chat in the registry.
 pub fn chat_node(workspace: &WorkspaceHost, chat: &str) -> Option<ChatNode> {
     let row = workspace.chat(chat).ok().flatten()?;
+    let peer_lead = workspace.peer_lead_item(chat).is_some();
     Some(ChatNode {
         parent: workspace.live_parent(chat).or(row.parent_chat_id),
-        role: workspace.standing_role_of_chat(chat).map(|role| role.role),
+        role: workspace
+            .standing_role_of_chat(chat)
+            .map(|role| role.role)
+            .or(peer_lead.then_some(StandingRoleKind::Lead)),
+        remote_parent: peer_lead,
     })
 }
 
@@ -233,7 +242,23 @@ pub fn context_packet(lead_item_id: &str, spec: &WorkItemTaskSpec, brief: &str) 
 
 /// What a Manager receives for a Lead's report: the digest, never the report.
 pub fn digest_for_manager(lead_item_id: &str, lead_chat_id: &str, report: &str) -> String {
-    LeadDigest::from_report(lead_item_id, lead_chat_id, report).render()
+    digest_for_manager_status(lead_item_id, lead_chat_id, report, false)
+}
+
+/// [`digest_for_manager`] with the status: `done` for a report that carries a
+/// completion, `InProgress` otherwise. A report that already is this Lead's
+/// digest within the cap comes back as it was, so a digest made on the
+/// Lead's device is not wrapped again on the Manager's.
+pub fn digest_for_manager_status(lead_item_id: &str, lead_chat_id: &str, report: &str, done: bool) -> String {
+    let header = format!("[Lead digest, item {lead_item_id}, chat {lead_chat_id}]");
+    if report.starts_with(&header) && approx_tokens(report) <= mast_proto::MAX_LEAD_DIGEST_TOKENS {
+        return report.to_owned();
+    }
+    let mut digest = LeadDigest::from_report(lead_item_id, lead_chat_id, report);
+    if done {
+        digest.status = mast_proto::LeadDigestStatus::Done;
+    }
+    digest.bounded().render()
 }
 
 #[cfg(test)]
@@ -247,7 +272,7 @@ mod tests {
     fn tree(rows: &[(&'static str, Option<&str>, Option<StandingRoleKind>)]) -> Tree {
         rows.iter()
             .map(|(id, parent, role)| {
-                (*id, ChatNode { parent: parent.map(str::to_owned), role: *role })
+                (*id, ChatNode { parent: parent.map(str::to_owned), role: *role, remote_parent: false })
             })
             .collect()
     }

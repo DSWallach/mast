@@ -1447,6 +1447,8 @@ impl AgentToolsService {
         match self.workspace.standing_role_of_chat(&context.grant.chat_id).map(|role| role.role) {
             Some(StandingRoleKind::Manager) => Some(AgentRoleProfile::Manager),
             Some(StandingRoleKind::Lead) => Some(AgentRoleProfile::Lead),
+            // A Lead a paired Manager started here holds no role row.
+            _ if self.workspace.peer_lead_item(&context.grant.chat_id).is_some() => Some(AgentRoleProfile::Lead),
             _ if context.chat_has_parent => {
                 let spec = self.workspace.chat_task_spec(&context.grant.chat_id, &context.grant.space_id);
                 assigned_catalog_role(spec.as_ref())
@@ -3164,11 +3166,18 @@ impl AgentToolsService {
     /// `chat_project_scope_chats`: the Chats on items inside the caller's
     /// project, or the caller's own item subtree when outside a project.
     fn project_scope_chats(&self, context: &CallContext) -> Value {
-        let chat_ids: Vec<String> = context
+        // A Lead sees its own subtree, never the whole project: the chats on
+        // items inside its item, and every chat below it in the chat tree.
+        let lead = self.catalog_role(context) == Some(mast_proto::AgentRoleProfile::Lead);
+        let mut chat_ids: Vec<String> = context
             .current_item_id()
             .map(|root| {
                 let snapshot = self.work_outline.snapshot(&context.grant.space_id);
-                let project = snapshot.project_root(&root).map(|item| item.id.clone()).unwrap_or(root);
+                let project = if lead {
+                    root
+                } else {
+                    snapshot.project_root(&root).map(|item| item.id.clone()).unwrap_or(root)
+                };
                 snapshot
                         .assignments
                         .iter()
@@ -3181,6 +3190,18 @@ impl AgentToolsService {
                         .collect()
             })
             .unwrap_or_default();
+        if lead {
+            let chats = self.workspace.read_chats().unwrap_or_default();
+            let mut frontier = vec![context.grant.chat_id.clone()];
+            while let Some(parent) = frontier.pop() {
+                for chat in chats.iter().filter(|chat| chat.parent_chat_id.as_deref() == Some(parent.as_str())) {
+                    if chat.id != context.grant.chat_id && !chat_ids.contains(&chat.id) {
+                        chat_ids.push(chat.id.clone());
+                        frontier.push(chat.id.clone());
+                    }
+                }
+            }
+        }
         let mut handoff_sources = Vec::new();
         let mut cursor = context.grant.chat_id.clone();
         while let Some(source) = self

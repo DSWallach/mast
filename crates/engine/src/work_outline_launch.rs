@@ -585,6 +585,30 @@ impl WorkItemLaunchService {
         self.launch_chat_for_work_item(p, None, None).await
     }
 
+    /// The Lead tier's checks that need the whole project (Lead count, subtree
+    /// lease, budget, parent), run on the device the Manager is on before a
+    /// Lead launch is forwarded to the device that owns the item. The owner
+    /// runs them again; this device sees every Lead the Manager has started.
+    pub async fn precheck_lead(&self, p: &CreateChatForWorkItemParams) -> Result<(), WorkOutlineError> {
+        if p.standing_role != Some(mast_proto::StandingRoleKind::Lead) {
+            return Ok(());
+        }
+        let _gate = self.gate.lock().await;
+        let chat_id = derive_id(&p.operation_id, roles::CHAT);
+        let not_found = || error(WorkOutlineErrorCode::NotFound, "Work item not found");
+        let space_id = self.workspace.work_item_space(&p.work_item_id).ok_or_else(not_found)?;
+        let inputs = self.workspace.work_outline_inputs(&space_id);
+        let snapshot = mast_doc::materialize_work_outline(&space_id, &inputs);
+        let item = snapshot.item(&p.work_item_id).ok_or_else(not_found)?;
+        self.admit_lead_tier(p, &chat_id, &snapshot, &inputs, item, true, false).map(|_| ())
+    }
+
+    /// Hold the launch gate: the one lock every launch and every Lead-tier
+    /// count (Leads per project, Workers per Lead) is taken under.
+    pub async fn lock_gate(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.gate.clone().lock_owned().await
+    }
+
     /// Select and durably record a scheduled standing-chat target while the
     /// same gate used by role hand-offs is held. An already selected target is
     /// an operation input: a retry must not silently move it to a successor.
@@ -1223,8 +1247,11 @@ No active workers.");
                 "The work item is archived",
             ));
         }
-        let filled = automatic
-            .is_none()
+        let lead_launch = p.standing_role == Some(mast_proto::StandingRoleKind::Lead)
+            || hand_off.is_some_and(|(_, source, _, _)| self.chat_holds_lead(source));
+        // An automatic successor keeps its stored config, except a Lead's with
+        // none: it is filled so the read-only sandbox below has a config to bind.
+        let filled = (automatic.is_none() || (lead_launch && p.config.is_none()))
             .then(|| self.prepare_launch_model(p, &chat_id, Some(&snapshot.space_settings)));
         let p = filled.as_ref().unwrap_or(p);
         // A worker started without a window gets the Space's (Codex only).
@@ -1243,8 +1270,6 @@ No active workers.");
         // Lead tier: admission (parent, depth, limits, budget, lease) and the
         // read-only sandbox. A hand-off successor of a Lead only keeps the
         // sandbox: it takes the role over, so it adds no Lead.
-        let lead_launch = p.standing_role == Some(mast_proto::StandingRoleKind::Lead)
-            || hand_off.is_some_and(|(_, source, _, _)| self.chat_holds_lead(source));
         let under_lead = self.admit_lead_tier(p, &chat_id, &snapshot, &outline_inputs, item, lead_launch, hand_off.is_some())?;
         let read_only_lead;
         let p = if lead_launch && p.config.as_ref().is_some_and(|c| c.sandbox != SandboxLevel::ReadOnly) {
@@ -2184,6 +2209,11 @@ No active workers.");
                 .into_iter()
                 .filter(|role| role.role == mast_proto::StandingRoleKind::Lead && role.scope_item_id != item.id)
                 .filter(|role| snapshot.project_root(&role.scope_item_id).map(|root| &root.id) == project.as_ref())
+                // A Lead whose item is Completed has handed its subtree back:
+                // it frees its slot and its lease even if its chat is not archived.
+                .filter(|role| {
+                    snapshot.item(&role.scope_item_id).is_none_or(|lead| lead.status != mast_proto::WorkItemStatus::Completed)
+                })
                 .filter(|role| {
                     role.current_chat_id
                         .as_deref()

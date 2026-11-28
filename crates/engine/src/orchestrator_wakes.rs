@@ -614,6 +614,9 @@ struct State {
     core: WakeCore,
     auto_continue: auto_continue::AutoContinue,
     turn_starts: HashMap<String, TurnStart>,
+    /// Leads running on paired devices that have reported here: "peer:chat" →
+    /// their work item. Dropped when a digest says `Done`.
+    peer_leads: HashMap<String, String>,
     auto_continue_default: bool,
     settings_overrides: HashMap<String, WakeSettings>,
     handed_off_to: HashMap<String, String>,
@@ -960,6 +963,7 @@ impl OrchestratorWakes {
     /// Route reports of peer-created workers to `sink` (see [`crate::peer_link`]).
     /// Only the first call takes effect.
     pub fn set_remote_reports(&self, sink: Arc<dyn crate::peer_link::RemoteReportSink>) {
+        self.inner.workspace.set_peer_leads(sink.clone());
         let _ = self.inner.remote_reports.set(sink);
     }
 
@@ -2159,6 +2163,7 @@ impl OrchestratorWakes {
                     .workspace
                     .standing_role_of_chat(&chat.id)
                     .is_some_and(|role| role.role == mast_proto::StandingRoleKind::Lead)
+                    || self.inner.workspace.peer_lead_item(&chat.id).is_some()
             })
             .map(|chat| chat.id.as_str())
             .collect();
@@ -2342,7 +2347,7 @@ impl OrchestratorWakes {
                 return result;
             }
         }
-        self.report_to_parent_inner(from, text, None, None).await
+        self.report_to_parent_inner(from, text, None, None, false).await
     }
 
     /// [`Self::report_to_parent`] for the `report_to_parent` tool: the
@@ -2366,14 +2371,15 @@ impl OrchestratorWakes {
                 None => text.to_owned(),
             };
             let from = from.to_owned();
-            let routed = tokio::task::spawn_blocking(move || sink.report(&from, title.as_deref(), &text))
+            let done = completion.is_some();
+            let routed = tokio::task::spawn_blocking(move || sink.report_status(&from, title.as_deref(), &text, done))
                 .await
                 .map_err(|error| format!("remote report worker failed: {error}"))?;
             if let Some(result) = routed {
                 return result;
             }
         }
-        self.report_to_parent_inner(from, text, None, digest).await
+        self.report_to_parent_inner(from, text, None, digest, completion.is_some()).await
     }
 
     /// The lines added under a worker's report (see [`Self::report_to_parent_with`]).
@@ -2481,6 +2487,12 @@ impl OrchestratorWakes {
         if body.is_empty() {
             return Ok(PeerReportOutcome::Dropped("the report is empty"));
         }
+        // A Lead's report is its digest, whatever the sending device did: one
+        // that arrives whole (an older build, a custom sender) is bounded here.
+        let body = match report.lead_item_id.as_deref() {
+            Some(item) => crate::lead_role::digest_for_manager(item, &report.chat_id, &body),
+            None => body,
+        };
         let (parent_id, worker) = {
             let state = lock(&self.inner.state);
             let mut parent = report.parent_chat_id.clone();
@@ -2502,12 +2514,27 @@ impl OrchestratorWakes {
         // An archived parent cannot take a report, and retrying never helps: the
         // report goes to the Manager of the parent's work item, or is dropped.
         let (parent_id, rerouted_from) = if parent.archived {
+            // A Lead's Worker never reaches the Manager, not even once its Lead
+            // is archived: the Manager hears of the subtree only in a digest.
+            if report.lead_item_id.is_none() && self.was_lead(&parent.id) {
+                return Ok(PeerReportOutcome::Dropped("the parent Lead is archived; a Lead's Worker never reports past its Lead"));
+            }
             match self.manager_for_archived(&parent) {
                 Some(manager) => (manager, Some(parent_id)),
                 None => return Ok(PeerReportOutcome::Dropped("the parent chat is archived and its work item has no Manager here")),
             }
         } else {
             (parent_id, None)
+        };
+        // A peer Lead's digest is checked here, on the Manager's device, where
+        // every Lead and lease of the project are visible.
+        let lead_notice = match report.lead_item_id.as_deref() {
+            Some(item) => self.peer_lead_notice(&parent_id, peer, &report.chat_id, item, &body),
+            None => None,
+        };
+        let body = match lead_notice {
+            Some(notice) => format!("{notice}\n{body}"),
+            None => body,
         };
         let now = self.now();
         {
@@ -2588,6 +2615,91 @@ impl OrchestratorWakes {
         told.len()
     }
 
+    /// Whether `chat` is, or ever was, a Lead (its role row's chain, or a
+    /// Lead a paired Manager started here).
+    fn was_lead(&self, chat: &str) -> bool {
+        lock(&self.inner.state).chats.get(chat).is_some_and(|info| info.lead)
+            || self.inner.workspace.peer_lead_item(chat).is_some()
+            || self
+                .inner
+                .workspace
+                .standing_roles()
+                .iter()
+                .any(|role| role.role == mast_proto::StandingRoleKind::Lead && role.chain.iter().any(|id| id == chat))
+    }
+
+    /// The Manager's device's view of a Lead running on a paired device:
+    /// A warning line when the receiver is not a Manager, the item is not in
+    /// its Space, the project is over its Lead limit, or the Lead's
+    /// `ownedPaths` overlap another live Lead's lease. The digest is still
+    /// delivered (dropping it would lose the Lead's news); the Lead's own
+    /// device enforced the limit it can see, and only this device sees the
+    /// local Leads too.
+    fn peer_lead_notice(
+        &self,
+        manager: &str,
+        peer: &str,
+        lead_chat: &str,
+        item: &str,
+        digest: &str,
+    ) -> Option<String> {
+        let workspace = &self.inner.workspace;
+        let warn = |text: &str| Some(format!("[Lead tier warning: {text}]"));
+        if workspace.standing_role_of_chat(manager).is_none_or(|role| role.role != mast_proto::StandingRoleKind::Manager) {
+            return warn("this chat is not a project Manager, and a Lead reports only to its Manager.");
+        }
+        let space = workspace.chat(manager).ok().flatten().and_then(|chat| chat.space_id)?;
+        let inputs = workspace.work_outline_inputs(&space);
+        let snapshot = mast_doc::materialize_work_outline(&space, &inputs);
+        if snapshot.item(item).is_none() {
+            return warn("the Lead's work item is not in this Space.");
+        }
+        let project = snapshot.project_root(item).map(|root| root.id.clone());
+        let key = format!("peer:{peer}:{lead_chat}");
+        let done = digest.lines().next().is_some_and(|head| head.ends_with("status: Done"));
+        let chats = workspace.read_chats().unwrap_or_default();
+        let mut others: Vec<String> = workspace
+            .standing_roles()
+            .into_iter()
+            .filter(|role| role.role == mast_proto::StandingRoleKind::Lead && role.scope_item_id != item)
+            .filter(|role| snapshot.project_root(&role.scope_item_id).map(|root| &root.id) == project.as_ref())
+            .filter(|role| role.current_chat_id.as_deref().is_some_and(|id| chats.iter().any(|chat| chat.id == id && !chat.archived)))
+            .map(|role| role.scope_item_id)
+            .collect();
+        let mut state = lock(&self.inner.state);
+        if done {
+            state.peer_leads.remove(&key);
+        } else {
+            state.peer_leads.insert(key.clone(), item.to_owned());
+        }
+        others.extend(
+            state
+                .peer_leads
+                .iter()
+                .filter(|(other, other_item)| **other != key && other_item.as_str() != item)
+                .filter(|(_, other_item)| snapshot.project_root(other_item).map(|root| &root.id) == project.as_ref())
+                .map(|(_, other_item)| other_item.clone()),
+        );
+        drop(state);
+        others.sort();
+        others.dedup();
+        let mut notices = Vec::new();
+        if let Err(refusal) = crate::lead_role::check_lead_count(others.len()) {
+            notices.push(format!("{refusal} on this device and its paired devices; archive one before starting more."));
+        }
+        let specs = crate::path_leases::task_specs(&inputs);
+        if let Some(spec) = specs.get(item).filter(|spec| !spec.owned_paths.is_empty()) {
+            let held: Vec<_> = others
+                .iter()
+                .filter_map(|id| specs.get(id).filter(|s| !s.owned_paths.is_empty()).map(|s| crate::lead_role::subtree_lease(id, s)))
+                .collect();
+            if let Err(wait) = crate::path_leases::PathLeaseRegistry::new(held).check(&crate::lead_role::subtree_lease(item, spec)) {
+                notices.push(format!("Lead subtree lease overlaps another Lead: {wait}."));
+            }
+        }
+        (!notices.is_empty()).then(|| format!("[Lead tier warning: {}]", notices.join(" ")))
+    }
+
     /// The live Manager chat on this device for the work item an archived chat
     /// was assigned to, or the nearest ancestor item that has one.
     fn manager_for_archived(&self, archived: &mast_proto::Chat) -> Option<String> {
@@ -2612,7 +2724,7 @@ impl OrchestratorWakes {
         if !self.inner.workspace.final_handback_is_locally_authenticated(intent) {
             return Err("final handback has no local authentication receipt".into());
         }
-        self.report_to_parent_inner(&intent.worker_chat_id, &intent.report, Some(intent), None).await
+        self.report_to_parent_inner(&intent.worker_chat_id, &intent.report, Some(intent), None, true).await
     }
 
     /// Retry locally authenticated intents after recovery. Unavailable
@@ -2711,6 +2823,7 @@ impl OrchestratorWakes {
         text: &str,
         final_intent: Option<&FinalHandbackIntent>,
         digest: Option<String>,
+        done: bool,
     ) -> Result<mast_proto::ReportToParentResult, String> {
         let text = text.trim();
         if text.is_empty() {
@@ -2783,7 +2896,7 @@ impl OrchestratorWakes {
             // whole report. Bounded last, so the appended lines count too.
             let (report, truncated) = match self.inner.workspace.standing_role_of_chat(from) {
                 Some(role) if role.role == mast_proto::StandingRoleKind::Lead => (
-                    crate::lead_role::digest_for_manager(&role.scope_item_id, from, &report),
+                    crate::lead_role::digest_for_manager_status(&role.scope_item_id, from, &report, done),
                     truncated || report.len() > mast_proto::MAX_LEAD_DIGEST_TOKENS as usize * 4,
                 ),
                 _ => (report, truncated),

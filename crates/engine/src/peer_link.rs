@@ -246,7 +246,21 @@ struct PeerChat {
     /// never looked up here, and reports for it only ever go back to this peer.
     #[serde(default)]
     remote_parent: Option<String>,
+    /// Set when the peer's Manager started this chat as a Lead (its work item,
+    /// in the Manager's registry, kept as an opaque id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lead_item_id: Option<String>,
+    /// The paths the Lead's lease covers, as the Manager named them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    lead_owned_paths: Vec<String>,
     created_at_ms: i64,
+}
+
+/// A Lead a paired Manager asks this device to run.
+#[derive(Debug, Clone)]
+pub struct PeerLeadClaim {
+    pub item_id: String,
+    pub owned_paths: Vec<String>,
 }
 
 /// A worker report waiting for its peer to collect it.
@@ -298,6 +312,13 @@ pub trait RemoteReportSink: Send + Sync {
     fn report(&self, chat_id: &str, title: Option<&str>, text: &str) -> Option<Result<mast_proto::ReportToParentResult, String>>;
     /// The paired device and the chat on it that `chat_id`'s reports go to.
     fn remote_parent_of(&self, _chat_id: &str) -> Option<(String, String)> { None }
+    /// [`Self::report`] where `done` says the chat finished (a report with a
+    /// completion): a Lead's digest then reads `Done`.
+    fn report_status(&self, chat_id: &str, title: Option<&str>, text: &str, _done: bool) -> Option<Result<mast_proto::ReportToParentResult, String>> {
+        self.report(chat_id, title, text)
+    }
+    /// The work item a paired Manager started `chat_id` as a Lead for, if it did.
+    fn lead_item_of(&self, _chat_id: &str) -> Option<String> { None }
 }
 
 impl PairedPeer {
@@ -641,6 +662,22 @@ impl PeerRegistry {
     /// Record that `peer_id` created `chat_id`, and where its reports go.
     /// Idempotent for the same peer; a chat another peer created is refused.
     pub fn claim_chat(&self, peer_id: &str, chat_id: &str, remote_parent: Option<&str>) -> Result<(), String> {
+        self.claim_chat_as(peer_id, chat_id, remote_parent, None, &HashSet::new())
+    }
+
+    /// [`Self::claim_chat`] for a Lead (`lead`): refused past the project's
+    /// Lead limit or when its `ownedPaths` overlap another live Lead of the
+    /// same Manager. `archived` are the chats that no longer hold a slot.
+    /// The count and the claim are one atomic update, so two Leads started
+    /// together cannot both take the last slot.
+    pub fn claim_chat_as(
+        &self,
+        peer_id: &str,
+        chat_id: &str,
+        remote_parent: Option<&str>,
+        lead: Option<&PeerLeadClaim>,
+        archived: &HashSet<String>,
+    ) -> Result<(), String> {
         let outcome = self
             .update(|state| {
                 if !state.peers.iter().any(|p| p.id == peer_id) {
@@ -652,10 +689,32 @@ impl PeerRegistry {
                 if state.chats.iter().filter(|c| c.peer_id == peer_id).count() >= MAX_PEER_CHATS {
                     return Err(format!("this peer already owns {MAX_PEER_CHATS} chats; archive some and revoke old pairings"));
                 }
+                if let Some(lead) = lead {
+                    let others: Vec<&PeerChat> = state
+                        .chats
+                        .iter()
+                        .filter(|c| c.peer_id == peer_id && c.lead_item_id.is_some() && c.remote_parent.as_deref() == remote_parent)
+                        .filter(|c| !archived.contains(&c.chat_id) && c.lead_item_id.as_deref() != Some(lead.item_id.as_str()))
+                        .collect();
+                    crate::lead_role::check_lead_count(others.len()).map_err(|e| e.to_string())?;
+                    let spec_of = |paths: &[String]| mast_proto::WorkItemTaskSpec { owned_paths: paths.to_vec(), ..Default::default() };
+                    if !lead.owned_paths.is_empty() {
+                        let held: Vec<_> = others
+                            .iter()
+                            .filter(|c| !c.lead_owned_paths.is_empty())
+                            .filter_map(|c| c.lead_item_id.as_deref().map(|id| crate::lead_role::subtree_lease(id, &spec_of(&c.lead_owned_paths))))
+                            .collect();
+                        crate::path_leases::PathLeaseRegistry::new(held)
+                            .check(&crate::lead_role::subtree_lease(&lead.item_id, &spec_of(&lead.owned_paths)))
+                            .map_err(|wait| format!("Lead subtree lease: {wait}"))?;
+                    }
+                }
                 state.chats.push(PeerChat {
                     peer_id: peer_id.to_string(),
                     chat_id: chat_id.to_string(),
                     remote_parent: remote_parent.map(str::to_string),
+                    lead_item_id: lead.map(|l| l.item_id.clone()),
+                    lead_owned_paths: lead.map(|l| l.owned_paths.clone()).unwrap_or_default(),
                     created_at_ms: now_ms(),
                 });
                 Ok(())
@@ -712,6 +771,7 @@ impl PeerRegistry {
                     parent_chat_id: parent.clone(),
                     text: text.to_string(),
                     created_at_ms: now,
+                    lead_item_id: chat.lead_item_id.clone(),
                 },
             });
             state.recent.push(RecentReport { chat_id: chat_id.to_string(), digest, at_ms: now });
@@ -803,11 +863,27 @@ impl RemoteReportSink for PeerRegistry {
     }
 
     fn report(&self, chat_id: &str, title: Option<&str>, text: &str) -> Option<Result<mast_proto::ReportToParentResult, String>> {
+        self.report_status(chat_id, title, text, false)
+    }
+
+    fn lead_item_of(&self, chat_id: &str) -> Option<String> {
+        self.state_or_deny_all().chats.iter().find(|c| c.chat_id == chat_id)?.lead_item_id.clone()
+    }
+
+    fn report_status(&self, chat_id: &str, title: Option<&str>, text: &str, done: bool) -> Option<Result<mast_proto::ReportToParentResult, String>> {
         self.remote_parent(chat_id)?;
-        let (text, truncated) = mast_proto::cap_worker_report(text);
+        let (text, mut truncated) = mast_proto::cap_worker_report(text);
         if text.is_empty() {
             return Some(Err("text is empty".into()));
         }
+        // A Lead's report crosses the link as its bounded digest, never whole.
+        let text = match self.lead_item_of(chat_id) {
+            Some(item) => {
+                truncated = truncated || text.len() > mast_proto::MAX_LEAD_DIGEST_TOKENS as usize * 4;
+                crate::lead_role::digest_for_manager_status(&item, chat_id, &text, done)
+            }
+            None => text,
+        };
         match self.enqueue_report(chat_id, title, &text) {
             Ok(Some((_, parent))) => Some(Ok(mast_proto::ReportToParentResult {
                 parent_chat_id: parent,
@@ -1000,6 +1076,18 @@ impl PeerGate {
             .ok_or_else(|| "could not read this device's chats".to_string())
     }
 
+    /// Chats on this device that are archived (they no longer hold a Lead slot).
+    async fn archived_chat_ids(&self) -> Result<HashSet<String>, String> {
+        let rows = self.first_item(methods::WATCH_CHATS).await.ok_or("could not read this device's chats")?;
+        Ok(rows
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|row| row.get("archived").and_then(|v| v.as_bool()) == Some(true))
+            .filter_map(|row| row.get("id").and_then(|v| v.as_str()).map(str::to_string))
+            .collect())
+    }
+
     /// The folder of a Space that lives on this device.
     async fn space_path(&self, space_id: &str) -> Result<PathBuf, String> {
         let spaces = self.first_item(methods::WATCH_SPACES).await.ok_or("could not read this device's Spaces")?;
@@ -1154,9 +1242,32 @@ impl PeerGate {
         if remote_parent.as_ref().is_some_and(|p| p.len() > 100) {
             return Err("parentChatId is too long".to_string());
         }
+        // A Lead the peer's Manager starts here: the opaque id of its item and
+        // the paths its lease covers. Taken out so they never reach the chat row.
+        let lead_item = params.as_object_mut().and_then(|o| o.remove("leadItemId")).and_then(|v| v.as_str().map(|s| s.trim().to_string())).filter(|v| !v.is_empty());
+        let lead_paths: Vec<String> = params
+            .as_object_mut()
+            .and_then(|o| o.remove("leadOwnedPaths"))
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let lead = match lead_item {
+            Some(item_id) => {
+                if item_id.len() > 100 || lead_paths.len() > 64 || lead_paths.iter().any(|p| p.len() > 300) {
+                    return Err("leadItemId or leadOwnedPaths is too long".to_string());
+                }
+                if remote_parent.is_none() {
+                    return Err(crate::lead_role::LeadRefusal::LeadNeedsManager.to_string());
+                }
+                // A Lead is read-only whatever the Manager asked for.
+                params["config"]["sandbox"] = serde_json::to_value(mast_proto::SandboxLevel::ReadOnly).unwrap_or_default();
+                Some(PeerLeadClaim { item_id, owned_paths: lead_paths })
+            }
+            None => None,
+        };
         if may_claim && let Some((registry, peer_id)) = &self.peer {
+            let archived = if lead.is_some() { self.archived_chat_ids().await? } else { HashSet::new() };
             let (registry, peer_id, chat_id) = (registry.clone(), peer_id.clone(), chat_id);
-            tokio::task::spawn_blocking(move || registry.claim_chat(&peer_id, &chat_id, remote_parent.as_deref()))
+            tokio::task::spawn_blocking(move || registry.claim_chat_as(&peer_id, &chat_id, remote_parent.as_deref(), lead.as_ref(), &archived))
                 .await
                 .map_err(|e| e.to_string())??;
         }

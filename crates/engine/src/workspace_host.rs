@@ -212,6 +212,9 @@ struct PublishedGenerations {
 }
 
 struct WorkspaceHostInner {
+    /// Which chats are Leads a paired Manager started here (they hold no
+    /// standing-role row: their item lives in the Manager's registry).
+    peer_leads: std::sync::OnceLock<Arc<dyn crate::peer_link::RemoteReportSink>>,
     approval_ledger: Option<Mutex<LocalApprovalHistory>>,
     store: Arc<DocsStore>,
     config: WorkspaceHostConfig,
@@ -486,6 +489,7 @@ impl WorkspaceHost {
 
         let host = Self {
             inner: Arc::new(WorkspaceHostInner {
+                peer_leads: std::sync::OnceLock::new(),
                 approval_ledger,
                 store,
                 config,
@@ -936,6 +940,17 @@ impl WorkspaceHost {
 
     pub fn standing_roles(&self) -> Vec<mast_proto::StandingRole> {
         self.read(|doc| doc.standing_roles())
+    }
+
+    /// Tell the host where to ask whether a chat is a peer-started Lead.
+    pub fn set_peer_leads(&self, lookup: Arc<dyn crate::peer_link::RemoteReportSink>) {
+        let _ = self.inner.peer_leads.set(lookup);
+    }
+
+    /// The `leadItemId` a paired Manager started `chat_id` with, if it is a
+    /// Lead started that way.
+    pub fn peer_lead_item(&self, chat_id: &str) -> Option<String> {
+        self.inner.peer_leads.get()?.lead_item_of(chat_id)
     }
 
     /// The role `chat_id` holds right now; a superseded chat holds none.

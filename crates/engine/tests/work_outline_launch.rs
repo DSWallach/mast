@@ -6230,6 +6230,7 @@ fn peer_report(parent: &str) -> mast_proto::peer_link::PeerReportItem {
         parent_chat_id: parent.into(),
         text: "built on the peer".into(),
         created_at_ms: 1,
+        lead_item_id: None,
     }
 }
 
@@ -6836,5 +6837,143 @@ async fn a_lead_is_refused_on_a_harness_with_no_read_only_mode() {
     assert!(rig.core.workspace.standing_role_chat(Lead, &slice).is_none());
     // The same Lead on a harness that can enforce it starts.
     start_lead(&rig, &slice, "lead-mock", Some(&manager)).await.unwrap();
+    rig.core.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Lead tier, stage B: peer-hosted Leads, digest on the peer link, race, leak
+// ---------------------------------------------------------------------------
+
+fn lead_report(parent: &str, lead_item: Option<&str>, text: &str) -> mast_proto::peer_link::PeerReportItem {
+    mast_proto::peer_link::PeerReportItem {
+        id: format!("lead-report-{}", text.len()),
+        chat_id: "remote-lead".into(),
+        title: Some("Remote lead".into()),
+        parent_chat_id: parent.into(),
+        text: text.into(),
+        created_at_ms: 1,
+        lead_item_id: lead_item.map(str::to_owned),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_leaf_report_for_an_archived_lead_never_reaches_the_manager() {
+    let (rig, manager) = lead_rig().await;
+    let slice = lead_item(&rig, "Slice", None, json!({})).await;
+    let lead = start_lead(&rig, &slice, "lead", Some(&manager)).await.unwrap();
+    settle(&rig, &lead).await;
+    let chats = rig.core.workspace.read_chats().unwrap();
+    rig.core.orchestrator_wakes.ingest_chats(&chats).await;
+    rig.core.workspace.set_chat_archived(&lead, true).unwrap();
+    let outcome = rig.core.orchestrator_wakes.report_from_peer("fedora", &peer_report(&lead)).await;
+    assert!(matches!(outcome, Ok(mast_engine::orchestrator_wakes::PeerReportOutcome::Dropped(_))), "got {outcome:?}");
+    let to_manager = rig.core.orchestrator_wakes.status(&manager);
+    assert!(to_manager.held.iter().chain(&to_manager.recent).all(|e| !e.summary.contains("built on the peer")), "{to_manager:?}");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_leads_report_reaches_the_manager_as_a_bounded_digest_whoever_sent_it() {
+    let (rig, manager) = lead_rig().await;
+    let slice = lead_item(&rig, "Slice", None, json!({})).await;
+    let long = format!("Slice merged on the peer.\n{}", "internal detail ".repeat(3_000));
+    let outcome = rig.core.orchestrator_wakes.report_from_peer("fedora", &lead_report(&manager, Some(&slice), &long)).await;
+    assert_eq!(outcome, Ok(mast_engine::orchestrator_wakes::PeerReportOutcome::Queued));
+    let held = rig.core.orchestrator_wakes.status(&manager).held;
+    let report = held.iter().filter_map(|e| e.report.clone()).find(|r| r.contains("remote-lead")).expect("the digest");
+    assert!(report.contains("[Lead digest, item "), "{report}");
+    assert!(report.contains("Slice merged on the peer."));
+    assert!(report.len() < 2_000, "{} bytes", report.len());
+    // An item that is not in the Manager's Space, or a parent that is not a
+    // Manager, is delivered with a warning, never silently dropped.
+    let mut unknown = lead_report(&manager, Some("no-such-item"), "x done");
+    unknown.id = "unknown-item".into();
+    let outcome = rig.core.orchestrator_wakes.report_from_peer("fedora", &unknown).await;
+    assert_eq!(outcome, Ok(mast_engine::orchestrator_wakes::PeerReportOutcome::Queued));
+    let plain = launch(&rig, &params(&rig, "not-a-manager", "Do the work")).await.unwrap().chat_id;
+    settle(&rig, &plain).await;
+    let mut to_plain = lead_report(&plain, Some(&slice), "y done");
+    to_plain.id = "plain-parent".into();
+    let outcome = rig.core.orchestrator_wakes.report_from_peer("fedora", &to_plain).await;
+    assert_eq!(outcome, Ok(mast_engine::orchestrator_wakes::PeerReportOutcome::Queued));
+    let held = rig.core.orchestrator_wakes.status(&plain).held;
+    assert!(held.iter().filter_map(|e| e.report.as_deref()).any(|r| r.contains("not a project Manager")), "{held:?}");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_managers_device_warns_when_peer_leads_pass_the_limit_or_share_paths() {
+    let (rig, manager) = lead_rig().await;
+    let mut items = Vec::new();
+    for n in 0..4 {
+        let item = lead_item(&rig, &format!("Local {n}"), None, json!({ "ownedPaths": [format!("crates/l{n}/**")] })).await;
+        start_lead(&rig, &item, &format!("local-{n}"), Some(&manager)).await.unwrap();
+        items.push(item);
+    }
+    let fifth = lead_item(&rig, "Remote", None, json!({ "ownedPaths": ["crates/l0/src"] })).await;
+    let outcome = rig.core.orchestrator_wakes.report_from_peer("fedora", &lead_report(&manager, Some(&fifth), "started")).await;
+    assert_eq!(outcome, Ok(mast_engine::orchestrator_wakes::PeerReportOutcome::Queued));
+    let held = rig.core.orchestrator_wakes.status(&manager).held;
+    let report = held.iter().filter_map(|e| e.report.clone()).find(|r| r.contains("remote-lead")).expect("the digest");
+    assert!(report.contains("[Lead tier warning:"), "{report}");
+    assert!(report.contains("already has 4 Leads") && report.contains("lease"), "{report}");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_completed_lead_releases_its_slot_and_its_lease() {
+    let (rig, manager) = lead_rig().await;
+    let mut items = Vec::new();
+    for n in 0..4 {
+        let item = lead_item(&rig, &format!("Slice {n}"), None, json!({ "ownedPaths": [format!("crates/s{n}/**")] })).await;
+        start_lead(&rig, &item, &format!("lead-{n}"), Some(&manager)).await.unwrap();
+        items.push(item);
+    }
+    let fifth = lead_item(&rig, "Slice 5", None, json!({ "ownedPaths": ["crates/s0/src"] })).await;
+    let refused = start_lead(&rig, &fifth, "lead-5", Some(&manager)).await.unwrap_err();
+    assert!(refused.message.contains("already has 4 Leads"), "{}", refused.message);
+    rig.client
+        .call(
+            methods::WORK_OUTLINE_MUTATE,
+            json!({ "op": "updateWorkItem", "workItemId": items[0], "changes": { "status": "completed" }, "operationId": "complete-0" }),
+        )
+        .await
+        .unwrap();
+    // Its chat is not archived, but the slot and the `crates/s0` lease are free.
+    start_lead(&rig, &fifth, "lead-5-again", Some(&manager)).await.unwrap();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn parallel_create_chat_calls_under_a_lead_cannot_pass_six_workers() {
+    let (rig, manager) = lead_rig().await;
+    let slice = lead_item(&rig, "Slice", None, json!({})).await;
+    let lead = start_lead(&rig, &slice, "lead", Some(&manager)).await.unwrap();
+    let calls = (0..10).map(|n| {
+        let (client, lead) = (&rig.client, lead.clone());
+        async move {
+            client
+                .call(methods::MUTATE, json!({ "op": "createChat", "chatId": format!("race-{n}"), "spaceId": SPACE, "deviceId": DEVICE, "parentChatId": lead }))
+                .await
+        }
+    });
+    let results = futures::future::join_all(calls).await;
+    let admitted = results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(admitted, 6, "exactly the Lead's six Workers are admitted: {results:?}");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_completed_lead_report_digests_as_done() {
+    let (rig, manager) = lead_rig().await;
+    let slice = lead_item(&rig, "Slice", None, json!({})).await;
+    let lead = start_lead(&rig, &slice, "lead", Some(&manager)).await.unwrap();
+    let chats = rig.core.workspace.read_chats().unwrap();
+    rig.core.orchestrator_wakes.ingest_chats(&chats).await;
+    let completion = mast_proto::ReportCompletion { tested_sha: "abcdef1".into(), evidence: "ok".into() };
+    rig.core.orchestrator_wakes.report_to_parent_with(&lead, "All merged.", Some(&completion)).await.unwrap();
+    let held = rig.core.orchestrator_wakes.status(&manager).held;
+    let report = held.iter().find(|e| e.worker_chat_id == lead && e.report.is_some()).and_then(|e| e.report.clone()).expect("a digest");
+    assert!(report.contains("status: Done"), "{report}");
     rig.core.shutdown().await;
 }

@@ -94,6 +94,8 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "idempotency_key": { "type": "string", "description": "Stable key for this request (required inside a Mast chat). The same key returns the same chat; a new chat needs a new key." },
                     "newChat": { "type": "boolean", "default": false, "description": "Start a separate assignment (a reviewer or a parallel worker) instead of reusing or continuing the item's existing worker. Without it, a worker of yours that stopped is continued as a hand-off that keeps its assignment, worktree and settings." },
                     "standingRole": { "type": "string", "enum": ["lead"], "description": "Manager only: start the child as a Lead of workItemId." },
+                    "leadItemId": { "type": "string", "description": "With standingRole lead on a paired device's server: your work item the Lead is for (it has no item there). Needs parent (your Manager chat)." },
+                    "leadOwnedPaths": { "type": "array", "items": { "type": "string" }, "description": "With leadItemId: the paths the Lead's lease covers; the device refuses a Lead that overlaps another of yours." },
                     "workItemId": { "type": "string", "description": "Start the child for your chat's item, a descendant, or any item inside your project. Requires prompt; incompatible with cwd and branch." },
                     "project": { "type": "string", "description": "Space id, path, or name. Required unless device is given." },
                     "device": { "type": "string", "description": "Host device (id or name) for a chat without a Space; defaults to this device." },
