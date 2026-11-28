@@ -15,7 +15,9 @@ It is an engine library; no agent tool, RPC or UI calls it yet.
 - Targets are `main` and `mast/int/<project>/<lead>`. A missing integration
   branch is created from `baseRef` by the first land; `main` must exist. A
   branch that existed or has landings is never created again: if it is deleted,
-  its pending requests fail until it is restored.
+  its pending requests fail until it is restored. This includes a lead branch
+  removed on purpose: after any landing the queue never recreates that name, so
+  reusing it means creating the branch by hand.
 - One request per `(repository, target ref)` is `building` or
   `awaiting_review`; a partial unique index enforces it. A request waiting for
   review holds its lane until the verdict or `cancel`.
@@ -29,7 +31,10 @@ It is an engine library; no agent tool, RPC or UI calls it yet.
 - The merge commit is saved before the build is enqueued, under an operation id
   derived from it. After a crash or a full build queue the same commit and job
   are used if the target has not moved. Otherwise the old job is cancelled and
-  must end before the commit is made again.
+  must end before the commit is made again, even if the target moves back
+  meanwhile.
+- An approval covers only the tested commit or the current merge commit. Giving
+  up a merge commit drops an approval of it.
 - Repeating a submit returns the existing request only when branch, base, build,
   fragment and doc deltas match; different inputs are an error.
 - `force_cancel` frees a lane whose repository can no longer be read, and records
