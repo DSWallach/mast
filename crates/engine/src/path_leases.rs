@@ -329,6 +329,15 @@ pub fn paths_overlap(a: &str, b: &str) -> bool {
     a.iter().any(|a| b.iter().any(|b| segments_overlap(a, b)))
 }
 
+/// Whether every file `inner` may name lies under `outer`. Conservative: a
+/// glob segment only matches the same glob text, so unsure means not covered.
+pub fn path_covered_by(inner: &str, outer: &str) -> bool {
+    let (inner, outer) = (expand(inner), expand(outer));
+    inner
+        .iter()
+        .all(|i| outer.iter().any(|o| o.len() <= i.len() && o.iter().zip(i).all(|(a, b)| a == b)))
+}
+
 fn segments_overlap(a: &[String], b: &[String]) -> bool {
     // The shorter one covers everything under it, so only the shared prefix
     // has to agree.
