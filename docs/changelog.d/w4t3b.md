@@ -1,0 +1,2 @@
+- Credit fallback: a successor on the same harness keeps the stalled chat's model, reasoning level, model options and context window; one on another harness still starts on that harness's defaults.
+- Changes pane targets: when an agent binds a worktree that is already listed (even one picked by hand), it becomes an agent target bound now.
