@@ -91,7 +91,9 @@ where
 
     /// The stored entry, however old.
     pub fn peek(&self, key: &str) -> Option<Entry<V>> {
-        self.lock().entries.get(key).map(|entry| Entry::clone(entry))
+        // Copy the entry after the lock is released: only the `Arc` is taken under it.
+        let entry = self.lock().entries.get(key).cloned();
+        entry.map(|entry| Entry::clone(&entry))
     }
 
     fn is_fresh(&self, entry: &Entry<V>) -> bool {
@@ -122,7 +124,9 @@ where
             if !force
                 && let Some(entry) = state.entries.get(key)
                     && self.is_fresh(entry) {
-                        return Ok(Entry::clone(entry));
+                        let entry = entry.clone();
+                        drop(state);
+                        return Ok(Entry::clone(&entry));
                     }
             match state.inflight.get(key) {
                 Some((_, flight)) => flight.clone(),
