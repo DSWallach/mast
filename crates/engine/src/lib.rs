@@ -54,6 +54,7 @@ pub mod instruction_delivery;
 pub mod instruction_registry;
 pub mod linear;
 pub mod liveness;
+pub mod living_docs;
 pub mod local_import;
 pub mod managed_accounts;
 pub mod manager_status;
