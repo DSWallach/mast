@@ -1,21 +1,35 @@
-# The Space Builds panel against a real queue: open it, read a job's log, cancel the job,
-# then open the chat that owns it.
+# The Space Builds panel against a real queue on the embedded engine: open it, read the queued
+# job's log, cancel the job, then open the chat that owns the other one.
 name: builds-panel
 world: { preset: builds, seed: 1 }
 screenshot: on-fail
 steps:
   - click: "#running-lamp"
     caption: Open the running-chats popover from the titlebar lamp.
-  - expect: { visible: "#builds-panel", text: "1 waiting" }
+  - expect:
+      visible: "group[name='Build cargo test -p fixture-ui: queued #1']"
+      text: "1 waiting"
     criterion: builds-listed
-    caption: The Builds block lists the queued job and the cancelled one.
-  - click: "text=\"Log\":nth(0)"
+    caption: The Builds block lists the queued job and an already cancelled one.
+  - click: "button[name='Log of build cargo test -p fixture-ui']"
     caption: Open the queued job's log.
   - expect: { text: "fixture log: 1 job ahead" }
-    criterion: log-shown
+    criterion: builds-log
     caption: The log tail appears under the job.
-  - click: "text=\"Cancel\""
+  - click: "button[name='Cancel build cargo test -p fixture-ui']"
     caption: Cancel the queued job.
-  - expect: { not_text: "1 waiting", not_text: "queued #1" }
-    criterion: cancel-applied
-    caption: The job leaves the queue and moves to Recent as cancelled.
+  - expect:
+      visible: "group[name='Build cargo test -p fixture-ui: cancelled']"
+      not_visible: "button[name='Cancel build cargo test -p fixture-ui']"
+      not_text: "1 waiting"
+      timeout_ms: 10000
+    criterion: builds-cancel
+    caption: The job leaves the queue and is listed as cancelled, with no Cancel button.
+  - click: "button[name='Open the chat that owns build cargo test -p fixture-engine']"
+    caption: Open the chat that owns the other job.
+  - expect:
+      text: "Walk me through the design."
+      within: "#transcript-region"
+      not_visible: "#builds-panel"
+    criterion: builds-open-chat
+    caption: The popover closes and the owning chat opens.
