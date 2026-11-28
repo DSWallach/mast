@@ -686,7 +686,7 @@ impl Rig {
         while !f() {
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "timed out waiting for {what}"
+                "timed out waiting for {what}: {:?} {:?}", self.core.sessions.session_status("stamp-w"), self.prompts.lock().unwrap()
             );
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
