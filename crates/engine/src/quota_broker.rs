@@ -722,7 +722,7 @@ impl QuotaBroker {
             let entry = state.providers.get(&p);
             let used = entry.and_then(used_fraction);
             let mut obj = serde_json::Map::new();
-            obj.insert("used".into(), used.map_or(Value::Null, |f| percent(f)));
+            obj.insert("used".into(), used.map_or(Value::Null, percent));
             obj.insert("inflight".into(), percent(state.inflight(p)));
             if let Some(c) = entry
                 .and_then(|e| e.reading.as_ref())

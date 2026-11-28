@@ -72,7 +72,7 @@ A cap you don't adjust is saved exactly as it was. If something other than this 
 Once connected, it will check each provider's usage every 90 seconds (180 seconds for Antigravity `/usage`) while orchestration is active. It will only read usage and never refresh a single-use sign-in token. If a provider can't be read, it will use an estimate from local token usage. A provider that needs sign-in, or has neither a reading nor an estimate, will get no new work.
 
 - **Balanced failover** (default): new work will be spread by the room each provider has below the hard cap. A provider will keep the work until it reaches the soft cap and another provider below that cap has room. When no provider can take work, orchestration will pause and try again when one may have room.
-- **Pinned freeze**: work will never move to another provider. When work would pass the freeze cap, or the provider's usage can't be trusted, Mast will freeze, save a checkpoint and notify you.
+- **Pinned freeze**: work will never move to another provider. When work would pass the freeze cap (or that provider's own hard cap, if you set one), or the provider's usage can't be trusted, Mast will freeze, save a checkpoint and notify you.
 
 ## Antigravity account homes
 
