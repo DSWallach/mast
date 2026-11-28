@@ -238,7 +238,11 @@ mod tests {
             r#"{"policy":"pinnedFreeze","softCap":0.6,"hardCap":0.7,"freezeCap":0.8,"later":1}"#,
         )
         .unwrap();
-        assert_eq!(load(dir.path()), custom());
+        assert_eq!(load(dir.path()), QuotaSettings {
+                provider_hard_caps: BTreeMap::new(),
+                ..custom()
+            }
+        );
     }
 
     #[test]
