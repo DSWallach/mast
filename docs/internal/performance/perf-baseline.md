@@ -65,6 +65,56 @@ HOME=/tmp/perf/fakehome MAST_PERF_REAL_COPY=$D <that binary> --ignored --nocaptu
 | | `get(force)` + persist whole cache | 2 ms |
 | Harness | `git --version` spawn() call / total | 0.8 ms / 9.6 ms (first call also pays one login-shell PATH capture, ~0.9 s, prewarmed at boot) |
 
+## v0.3.0 distributions (Overview and SWR cache)
+
+Measured on the Linux desktop build host (slot `a`, `installed` profile, one `--quiet-window` job per
+run, 5 runs each, median ± MAD in ms). Baseline SHA `6693e260c` (v0.3.0 `e4d133879` plus the bench
+code only); optimized SHA `1d5bb8cdc`. The slot's environment file sets `CARGO_INCREMENTAL=1`, so the
+bench binaries were built incrementally, not with `CARGO_INCREMENTAL=0`. Samples are printed as
+`SAMPLE <bench> | <size> | <metric> | ms=`.
+
+```sh
+cargo test -p mast-ui --lib --profile installed -- --ignored --nocapture --test-threads=1 bench_overview_250
+cargo test -p mast-ui --lib --profile installed -- --ignored --nocapture --test-threads=1 bench_overview_1000
+cargo test -p mast-engine --profile installed --test swr_bench -- --ignored --nocapture --test-threads=1
+```
+
+### Overview (List mode, grouped by repo for the reorder row)
+
+| Metric | 250 chats | 1,000 chats |
+|---|---|---|
+| Cold open (first List draw) | 5.80 ± 0.05 | 8.88 ± 0.55 |
+| Idle redraw | 3.97 ± 0.11 | 4.05 ± 0.07 |
+| Scroll (90 px per frame) | 9.30 ± 0.06 | 9.59 ± 0.04 |
+| Grouped reorder (one chat moves, rows dirty) | 15.75 ± 0.16 | 21.30 ± 0.05 |
+
+The List is virtualized, so the "not virtualized, 44–55 ms" hot spot above is out of date. Idle redraw
+and scroll are flat from 250 to 1,000 chats (+0.09 ms and +0.29 ms), so the per-frame presentation
+build in `list_rendering.rs` is not where the time goes; only the reorder, which rebuilds rows, grows
+with the chat count. Presentation caching could save at most the +0.09 ms idle difference, below
+2 × MAD, so **no Overview change was made**.
+
+### SWR cache lock hold (reader's worst `peek` stall while a writer runs `get(force)`)
+
+| Keys | Metric | Baseline | Coalesced/off-lock writer |
+|---|---|---|---|
+| 1 | lock hold (max stall) | 1.16 ± 0.08 | 0.76 ± 0.05 |
+| 1 | `get(force)` | 0.78 ± 0.06 | 0.80 ± 0.02 |
+| 8 | lock hold (max stall) | 4.32 ± 0.06 | 10.11 ± 0.52 (**regressed**) |
+| 8 | `get(force)` | 3.37 ± 0.16 | 0.96 ± 0.02 |
+| 8 | reader mean peek | 1.09 ± 0.16 | 0.41 ± 0.02 |
+| 32 | lock hold (max stall) | 19.85 ± 3.13 | 0.54 ± 0.03 |
+| 32 | `get(force)` | 14.57 ± 3.13 | 0.31 ± 0.01 |
+| 32 | reader mean peek | 4.86 ± 0.33 | 0.15 ± 0.00 |
+
+`SwrStore::finish` used to serialize the whole map under the store lock. It now takes an `Arc`
+snapshot of the entries under the lock and builds the JSON in the writer. The win clears 2 × baseline
+MAD at 1 and 32 keys and for mean peek at every size. The 8-key worst stall is the exception: four of
+five runs sit near 10 ms while 32 keys is 0.5 ms, which does not follow the code path (nothing under
+the lock grew), so it looks like a scheduling artifact of the spinning reader thread, but it was not
+isolated. The SWR unit tests (cold reload, cleared-cache write ordering, shared in-flight fetch) pass.
+Overview keyboard selection, scroll anchor, hover and cold reopen are untouched.
+
 ## Fixes in this branch (each commit has its own before/after)
 
 1. **Transcript rail cache** (`rail.rs`, `transcript.rs`): the rail rebuilt its ticks every frame
