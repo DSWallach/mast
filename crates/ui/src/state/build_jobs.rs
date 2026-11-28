@@ -44,8 +44,12 @@ impl AppState {
     /// `WatchBuildJobs` follows the Work Outline watch set exactly.
     pub(super) fn reconcile_build_job_watches(&mut self, cx: &mut Context<Self>) {
         let Some(handle) = self.engine.clone() else {
-            self.build_job_tasks.clear();
-            if self.build_jobs.retain(|_| false) {
+            // The store holds only what a watch delivered (`apply_build_jobs_frame`), so it
+            // goes with the watches. With no watch there is nothing of an engine's to drop,
+            // which leaves the engine-less previews' seeded jobs alone.
+            if !self.build_job_tasks.is_empty() {
+                self.build_job_tasks.clear();
+                self.build_jobs = Default::default();
                 cx.notify();
             }
             return;
@@ -213,10 +217,14 @@ mod tests {
             assert!(state.build_jobs().is_empty());
             assert_eq!(state.build_jobs().badge("chat"), None);
         });
-        // So does a reconcile that finds no engine.
+        // So does a reconcile that finds the engine gone while a watch is open.
         state.update(cx, |state, cx| {
-            state.set_test_build_jobs(queued());
+            state
+                .build_job_tasks
+                .insert("space".into(), gpui::Task::ready(()));
+            assert!(state.apply_build_jobs_frame("space", queued()));
             state.reconcile_build_job_watches(cx);
+            assert!(state.build_job_tasks.is_empty());
             assert!(state.build_jobs().is_empty());
         });
     }
