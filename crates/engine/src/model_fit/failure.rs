@@ -106,7 +106,9 @@ pub fn context_overloaded(
 ) -> bool {
     match (peak_tokens, window_tokens) {
         (Some(peak), Some(window)) if window > 0 => {
-            peak as f64 / window as f64 > f64::from(context_ceiling(tier))
+            // Whole percents, so that exactly the ceiling is not over it.
+            let percent = (context_ceiling(tier) * 100.0).round() as u128;
+            u128::from(peak) * 100 > u128::from(window) * percent
         }
         _ => false,
     }
