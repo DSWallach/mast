@@ -3657,8 +3657,8 @@ impl RpcService for EngineRpc {
                         })
                         .await
                         {
-                            Ok(Ok((mut launch, source, harness, model, reasoning))) => {
-                                launch.config = hand_off_config(&self.registry, self.repos.data_dir(), launch.config, self.doc_host.harness_for(&source), harness, model, reasoning, Default::default()).await?;
+                            Ok(Ok((mut launch, source, harness, model, reasoning, model_options))) => {
+                                launch.config = hand_off_config(&self.registry, self.repos.data_dir(), launch.config, self.doc_host.harness_for(&source), harness, model, reasoning, model_options).await?;
                                 self.launch.create_orchestrator_successor(
                                     &launch, &self.orchestrator_wakes, &source,
                                     crate::work_outline_launch::HandOffOrigin::Agent,

@@ -79,6 +79,8 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                 "harness": {"type":"string", "description":"Successor harness id (see list_harnesses)."},
                 "model": {"type":"string", "description":"Successor model id (see list_models for the chosen harness)."},
                 "reasoning": {"type":"string", "description":"Reasoning level supported by the chosen model."},
+                "contextWindow": {"type":["string","integer"], "description":"Context window for the successor, one of the choices list_models shows for the model (Codex: \"default\" or a token count; Claude: default, 250k, 500k, 750k or 1m). Omit it to keep your own window."},
+                "modelOptions": {"type":"object", "description":"Other model options for the successor, as the hand-off dialog sends them. Explicit picks win over your own options."},
                 "idempotencyKey": {"type":"string", "description":"Stable key for this hand-off; reuse on retry."}
             }, "required":["summary", "idempotencyKey"]}),
         },

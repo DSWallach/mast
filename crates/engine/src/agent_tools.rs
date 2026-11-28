@@ -3960,7 +3960,7 @@ impl AgentToolsService {
     pub fn prepare_orchestrator_successor(
         &self,
         params: &AgentToolCallParams,
-    ) -> Result<(mast_proto::CreateChatForWorkItemParams, String, Option<mast_proto::HarnessId>, Option<String>, Option<mast_proto::ReasoningLevel>), AgentToolError> {
+    ) -> Result<(mast_proto::CreateChatForWorkItemParams, String, Option<mast_proto::HarnessId>, Option<String>, Option<mast_proto::ReasoningLevel>, serde_json::Map<String, Value>), AgentToolError> {
         let context = self.context(&params.token)?;
         let operation_id = context.operation_id(&params.arguments)?;
         let summary = params.arguments.get("summary").and_then(Value::as_str)
@@ -3980,9 +3980,26 @@ impl AgentToolsService {
             harness: Option<mast_proto::HarnessId>,
             model: Option<String>,
             reasoning: Option<mast_proto::ReasoningLevel>,
+            #[serde(default, rename = "modelOptions")]
+            model_options: serde_json::Map<String, Value>,
+            #[serde(default, rename = "contextWindow")]
+            context_window: Option<Value>,
         }
         let selection: Selection = serde_json::from_value(params.arguments.clone())
             .map_err(|error| AgentToolError::invalid(format!("invalid hand-off selection: {error}")))?;
+        // `contextWindow` is shorthand for the `contextWindow` model option,
+        // the way the hand-off dialog sends it; an integer is a token count.
+        let mut model_options = selection.model_options;
+        match selection.context_window {
+            None | Some(Value::Null) => {}
+            Some(Value::String(window)) if !window.trim().is_empty() => {
+                model_options.insert("contextWindow".into(), Value::String(window.trim().to_owned()));
+            }
+            Some(Value::Number(tokens)) if tokens.as_u64().is_some_and(|t| t > 0) => {
+                model_options.insert("contextWindow".into(), Value::String(tokens.to_string()));
+            }
+            Some(_) => return Err(AgentToolError::invalid("contextWindow must be a non-empty string or a positive token count")),
+        }
         Ok((mast_proto::CreateChatForWorkItemParams {
             work_item_id,
             initial_prompt: mast_proto::WorkItemPrompt { text: summary.to_owned(), attachments: Vec::new() },
@@ -3994,7 +4011,7 @@ impl AgentToolsService {
             target_device_id: None,
             account_id: None,
             standing_role: None,
-        }, source, selection.harness, selection.model, selection.reasoning))
+        }, source, selection.harness, selection.model, selection.reasoning, model_options))
     }
 }
 
