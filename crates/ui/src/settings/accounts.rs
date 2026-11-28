@@ -1883,7 +1883,7 @@ impl Render for AccountsPage {
 
 /// The Accounts page as the preview draws it: three providers' usage windows
 /// under the Quota caps section, Claude Code on the default 85% hard cap and
-/// Codex on a 75% one. No engine is involved.
+/// Codex on a 80% one. No engine is involved.
 pub fn preview_fixture(cx: &mut gpui::App) -> Entity<AccountsPage> {
     let window = |label: &str, used: f32| mast_proto::AgentUsageWindow {
         label: label.into(),
@@ -1925,7 +1925,7 @@ pub fn preview_fixture(cx: &mut gpui::App) -> Entity<AccountsPage> {
         warnings: vec![],
     };
     let mut caps = mast_engine::quota_settings::QuotaSettings::default();
-    caps.provider_hard_caps.insert("codex".into(), 0.75);
+    caps.provider_hard_caps.insert("codex".into(), 0.80);
     let state = cx.new(|_| AppState::new());
     cx.new(|cx| AccountsPage::fixture(state, accounts, caps, cx))
 }
