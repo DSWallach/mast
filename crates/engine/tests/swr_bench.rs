@@ -51,10 +51,16 @@ fn bench_swr_lock_hold() {
         let reader = {
             let (store, stop) = (store.clone(), stop.clone());
             std::thread::spawn(move || {
+                // `absent` takes the lock and returns: its latency is pure lock
+                // wait. `key0` also clones the entry, so it adds allocator cost.
                 let mut worst = 0f64;
+                let mut worst_lock = 0f64;
                 let mut total = 0f64;
                 let mut count = 0u64;
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let t = Instant::now();
+                    std::hint::black_box(store.peek("absent").is_some());
+                    worst_lock = worst_lock.max(t.elapsed().as_secs_f64() * 1000.0);
                     let t = Instant::now();
                     std::hint::black_box(store.peek("key0").is_some());
                     let ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -62,6 +68,7 @@ fn bench_swr_lock_hold() {
                     total += ms;
                     count += 1;
                 }
+                eprintln!("SAMPLE swr | {keys} | lock wait (reader max, no clone) | ms={worst_lock:.3}");
                 (worst, total / count.max(1) as f64)
             })
         };
