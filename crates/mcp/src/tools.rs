@@ -214,6 +214,9 @@ struct CreateChatArgs {
     work_item_id: Option<String>,
     #[serde(default, alias = "newChat")]
     new_chat: bool,
+    /// `"lead"`: start the child as a Lead of `workItemId` (Manager only).
+    #[serde(default, alias = "standingRole")]
+    standing_role: Option<String>,
     project: Option<String>,
     device: Option<String>,
     parent: Option<String>,
@@ -1231,7 +1234,13 @@ impl Tools {
             model: args.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned),
             account_id: args.account_id.as_deref().map(str::trim).filter(|a| !a.is_empty()).map(str::to_owned),
         };
-        let candidate = if !args.new_chat && let (Some(origin), Some(item)) = (origin, work_item_id.as_deref()) {
+        let lead = match args.standing_role.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+            None => false,
+            Some("lead") if work_item_id.is_some() => true,
+            Some("lead") => anyhow::bail!("standingRole lead needs a workItemId"),
+            Some(other) => anyhow::bail!("standingRole must be \"lead\", not {other:?}"),
+        };
+        let candidate = if !args.new_chat && !lead && let (Some(origin), Some(item)) = (origin, work_item_id.as_deref()) {
             Box::pin(self.reusable_chat(origin, item, &harnesses, &pins)).await?
         } else { None };
 
@@ -1271,6 +1280,7 @@ impl Tools {
                     inputs["workItemId"] = json!(item);
                 }
                 if args.new_chat { inputs["newChat"] = json!(true); }
+                if lead { inputs["standingRole"] = json!("lead"); }
                 let inputs_hash =
                     mast_proto::derive_id(&inputs.to_string(), "mcp-create-chat-inputs");
                 let claim = self.zeron
@@ -1338,7 +1348,8 @@ impl Tools {
                             // A new chat the caller forced is a separate (reviewer or
                             // parallel) assignment; otherwise the engine continues the
                             // item's existing worker as a hand-off.
-                            "separate": args.new_chat,
+                            "separate": args.new_chat || lead,
+                            "standingRole": lead.then_some("lead"),
                             // The engine authorizes it against this chat's own pin.
                             "accountId": pins.account_id,
                         }),

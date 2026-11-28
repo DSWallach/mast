@@ -1828,6 +1828,12 @@ impl EngineRpc {
                     return Ok(());
                 }
                 let parent_chat_id = parent_chat_id.filter(|p| !p.trim().is_empty());
+                // A plain child under a Lead is a Worker like any other: the
+                // depth and 6-Worker caps hold for every way of making one.
+                if let Some(parent) = parent_chat_id.as_deref() {
+                    crate::lead_role::admit_child(&self.workspace, parent, &chat_id)
+                        .map_err(|refusal| RpcError::Failed(refusal.to_string()))?;
+                }
                 // A child of a bound Chat in the same Space starts in the
                 // parent's execution root by default (acceptance 19), so it
                 // can inherit the binding; an explicit other cwd opts out of

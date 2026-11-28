@@ -781,6 +781,9 @@ struct LaunchChildArgs {
     /// continuation of the item's existing worker.
     #[serde(default)]
     separate: bool,
+    /// Only `lead` is accepted: a Manager starts a Lead of the item.
+    #[serde(default)]
+    standing_role: Option<mast_proto::StandingRoleKind>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3945,7 +3948,10 @@ impl AgentToolsService {
         )?;
         // A caller that names a harness or model chose a new worker on purpose;
         // only an unqualified launch continues the item's stopped one.
-        let continues = if args.separate || !(args.harness_omitted && args.model_omitted) {
+        if args.standing_role.is_some_and(|role| role != mast_proto::StandingRoleKind::Lead) {
+            return Err(AgentToolError::invalid("a child can only be started as a lead"));
+        }
+        let continues = if args.separate || args.standing_role.is_some() || !(args.harness_omitted && args.model_omitted) {
             None
         } else {
             self.continuation_source(&context, &snapshot, &args.work_item_id, &operation_id)?
@@ -3964,7 +3970,7 @@ impl AgentToolsService {
                 parent_chat_id: Some(context.grant.chat_id.clone()),
                 target_device_id: None,
                 account_id,
-                standing_role: None,
+                standing_role: args.standing_role,
             },
             continues,
         })

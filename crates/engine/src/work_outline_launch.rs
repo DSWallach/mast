@@ -481,6 +481,13 @@ pub struct WorkItemLaunchService {
     fault: Arc<Mutex<Option<LaunchStep>>>,
 }
 
+/// A standing-role chat created provisionally: its marker, and whether it
+/// keeps its parent link (a Lead does; its Manager is the parent).
+struct ProvisionalRole {
+    tag: String,
+    keeps_parent: bool,
+}
+
 impl WorkItemLaunchService {
     pub(crate) async fn lock_launch(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.gate.lock().await
@@ -1238,7 +1245,7 @@ No active workers.");
         // sandbox: it takes the role over, so it adds no Lead.
         let lead_launch = p.standing_role == Some(mast_proto::StandingRoleKind::Lead)
             || hand_off.is_some_and(|(_, source, _, _)| self.chat_holds_lead(source));
-        self.admit_lead_tier(p, &chat_id, &snapshot, &outline_inputs, item, lead_launch, hand_off.is_some())?;
+        let under_lead = self.admit_lead_tier(p, &chat_id, &snapshot, &outline_inputs, item, lead_launch, hand_off.is_some())?;
         let read_only_lead;
         let p = if lead_launch && p.config.as_ref().is_some_and(|c| c.sandbox != SandboxLevel::ReadOnly) {
             let mut changed = p.clone();
@@ -1380,16 +1387,17 @@ No active workers.");
         }
         // A Manager always runs read-only; refuse a harness that cannot
         // enforce that before the chat exists.
-        let manager_read_only = manager_role.is_some()
-            && mast_proto::StandingRole::manager_runs_read_only(
-                self.workspace
-                    .standing_role(mast_proto::StandingRoleKind::Manager, &p.work_item_id)
-                    .as_ref(),
-            );
+        let manager_read_only = lead_launch
+            || (manager_role.is_some()
+                && mast_proto::StandingRole::manager_runs_read_only(
+                    self.workspace
+                        .standing_role(mast_proto::StandingRoleKind::Manager, &p.work_item_id)
+                        .as_ref(),
+                ));
         if manager_read_only && !mast_harness::capabilities(harness).read_only {
             return Err(error(
                 WorkOutlineErrorCode::Invalid,
-                format!("{harness:?} has no read-only mode, which a Manager needs; use Claude Code or Codex"),
+                format!("{harness:?} has no read-only mode, which a Manager or Lead needs; use Claude Code or Codex"),
             ));
         }
         // A Manager's stacked envelope (role plus the project's instructions)
@@ -1486,7 +1494,7 @@ No active workers.");
                         spec,
                     );
                 if worker_launch {
-                    self.take_path_lease(&snapshot, &item.id, spec, &task_specs)?;
+                    self.take_path_lease(&snapshot, &item.id, spec, &task_specs, under_lead.as_deref())?;
                 }
                 let mut resolved = self.effective_configuration(p, &space_id).await?;
                 let has_item_setup = matches!(&resolved.source_scope, mast_proto::work_outline_execution::ExecutionSourceScope::WorkItem { .. });
@@ -1538,10 +1546,11 @@ No active workers.");
             &validated.execution_root,
             p.config.clone(),
             p.parent_chat_id.as_deref(),
-            p.standing_role.map(|kind| {
-                mast_proto::standing_role_provisional_marker(kind, &p.work_item_id, op)
+            p.standing_role.map(|kind| ProvisionalRole {
+                tag: mast_proto::standing_role_provisional_marker(kind, &p.work_item_id, op),
+                // Only a Lead has a parent (its Manager); other roles start unparented.
+                keeps_parent: kind == mast_proto::StandingRoleKind::Lead,
             }),
-            p.standing_role == Some(mast_proto::StandingRoleKind::Lead),
         )?;
         // A Work Outline launch has no Run worktree directive, so stamp the
         // branch needed for opted-in PR tracking here. This launch-time lookup
@@ -2138,14 +2147,6 @@ No active workers.");
             .is_some_and(|role| role.role == mast_proto::StandingRoleKind::Lead)
     }
 
-    fn lead_node(&self, chat: &str) -> Option<lead_role::ChatNode> {
-        let row = self.workspace.chat(chat).ok().flatten()?;
-        Some(lead_role::ChatNode {
-            parent: self.workspace.live_parent(chat).or(row.parent_chat_id),
-            role: self.workspace.standing_role_of_chat(chat).map(|role| role.role),
-        })
-    }
-
     /// The Lead tier's launch rules (see `lead_role`): a new Lead needs the
     /// project's Manager as parent, a free slot among the project's 4, a
     /// context packet under 8k tokens, a budget carved from the project's and a
@@ -2162,16 +2163,16 @@ No active workers.");
         item: &mast_proto::WorkItemView,
         lead_launch: bool,
         hand_off: bool,
-    ) -> Result<(), WorkOutlineError> {
+    ) -> Result<Option<String>, WorkOutlineError> {
         let refuse = |refusal: lead_role::LeadRefusal| conflict(refusal.to_string());
-        let node = |id: &str| self.lead_node(id);
+        let node = |id: &str| lead_role::chat_node(&self.workspace, id);
         let specs = path_leases::task_specs(inputs);
         let project = snapshot.project_root(&item.id).map(|root| root.id.clone());
         let chats = self.workspace.read_chats().unwrap_or_default();
         if lead_launch {
             lead_role::check_context_size(&p.initial_prompt.text).map_err(refuse)?;
             if hand_off || self.workspace.standing_role_chat(mast_proto::StandingRoleKind::Lead, &item.id).as_deref() == Some(chat_id) {
-                return Ok(());
+                return Ok(None);
             }
             if item.is_project {
                 return Err(error(WorkOutlineErrorCode::Invalid, "A Lead takes a work item inside a project, not the project"));
@@ -2191,36 +2192,33 @@ No active workers.");
                 .map(|role| role.scope_item_id)
                 .collect();
             lead_role::check_lead_count(other_leads.len()).map_err(refuse)?;
-            if let Some(spec) = specs.get(&item.id) {
-                let project_budget = project.as_ref().and_then(|id| specs.get(id)).map(|s| s.item_budget.clone()).unwrap_or_default();
-                let siblings: Vec<_> = other_leads.iter().filter_map(|id| specs.get(id)).map(|s| s.item_budget.clone()).collect();
-                lead_role::carve_budget(&project_budget, &siblings, &spec.item_budget).map_err(refuse)?;
+            let spec = specs.get(&item.id).cloned().unwrap_or_default();
+            let project_budget = project.as_ref().and_then(|id| specs.get(id)).map(|s| s.item_budget.clone()).unwrap_or_default();
+            let siblings: Vec<_> = other_leads.iter().filter_map(|id| specs.get(id)).map(|s| s.item_budget.clone()).collect();
+            lead_role::carve_budget(&project_budget, &siblings, &spec.item_budget).map_err(refuse)?;
+            if !spec.owned_paths.is_empty() {
                 let held: Vec<_> = other_leads
                     .iter()
                     .filter_map(|id| specs.get(id).filter(|s| !s.owned_paths.is_empty()).map(|s| lead_role::subtree_lease(id, s)))
                     .collect();
                 path_leases::PathLeaseRegistry::new(held)
-                    .check(&lead_role::subtree_lease(&item.id, spec))
+                    .check(&lead_role::subtree_lease(&item.id, &spec))
                     .map_err(|wait| conflict(format!("Lead subtree lease: {wait}")))?;
             }
-            return Ok(());
+            return Ok(None);
         }
         let Some(parent) = p.parent_chat_id.as_deref().filter(|_| hand_off_free(p, hand_off)) else {
-            return Ok(());
+            return Ok(None);
         };
-        let live_workers = chats
-            .iter()
-            .filter(|chat| chat.parent_chat_id.as_deref() == Some(parent) && !chat.archived && chat.id != chat_id)
-            .filter(|chat| self.workspace.standing_role_of_chat(&chat.id).is_none())
-            .count();
-        let Some(lead_chat) = lead_role::check_worker_parent(parent, &node, live_workers).map_err(refuse)? else {
-            return Ok(());
+        let Some(lead_chat) = lead_role::admit_child(&self.workspace, parent, chat_id).map_err(refuse)? else {
+            return Ok(None);
         };
         let Some(lead_item) = self.workspace.standing_role_of_chat(&lead_chat).map(|role| role.scope_item_id) else {
-            return Ok(());
+            return Ok(None);
         };
-        if let (Some(lead_spec), Some(spec)) = (specs.get(&lead_item), specs.get(&item.id)) {
-            lead_role::check_worker_paths(&lead_role::subtree_lease(&lead_item, lead_spec), spec).map_err(refuse)?;
+        if let Some(lead_spec) = specs.get(&lead_item) {
+            let spec = specs.get(&item.id).cloned().unwrap_or_default();
+            lead_role::check_worker_paths(&lead_role::subtree_lease(&lead_item, lead_spec), &spec).map_err(refuse)?;
             let siblings: Vec<_> = snapshot
                 .items
                 .iter()
@@ -2235,7 +2233,7 @@ No active workers.");
                 .collect();
             lead_role::carve_budget(&lead_spec.item_budget, &siblings, &spec.item_budget).map_err(refuse)?;
         }
-        Ok(())
+        Ok(Some(lead_item))
     }
 
     /// Hold the item's path lease for a worker launch, or refuse with the
@@ -2246,6 +2244,7 @@ No active workers.");
         item_id: &str,
         spec: Option<&mast_proto::WorkItemTaskSpec>,
         specs: &std::collections::HashMap<String, mast_proto::WorkItemTaskSpec>,
+        lead_item: Option<&str>,
     ) -> Result<(), WorkOutlineError> {
         let Some(spec) = spec.filter(|spec| !spec.owned_paths.is_empty()) else {
             return Ok(());
@@ -2254,18 +2253,10 @@ No active workers.");
             let activity = crate::work_queue::registry_chat_activity(&self.workspace, chat);
             activity.worker && !activity.archived
         });
-        // A Lead's subtree lease is the envelope its Workers' leases sit in
-        // (checked against `ownedPaths` containment at admission), so it is
-        // not a rival to them.
-        let lead_items: Vec<String> = self
-            .workspace
-            .standing_roles()
-            .into_iter()
-            .filter(|role| role.role == mast_proto::StandingRoleKind::Lead)
-            .map(|role| role.scope_item_id)
-            .filter(|lead| snapshot.is_within(lead, item_id))
-            .collect();
-        let held: Vec<_> = held.into_iter().filter(|lease| !lead_items.contains(&lease.holder)).collect();
+        // Only the Lead this Worker is a child of is exempt: its subtree
+        // lease is the envelope the Worker's paths were checked against at
+        // admission. Any other holder, a Lead's lease included, still counts.
+        let held: Vec<_> = held.into_iter().filter(|lease| Some(lease.holder.as_str()) != lead_item).collect();
         path_leases::PathLeaseRegistry::new(held)
             .check(&path_leases::Lease::from_spec(item_id, spec))
             .map_err(|wait| conflict(format!("Path lease: {wait}")))?;
@@ -2433,8 +2424,7 @@ No active workers.");
         execution_root: &str,
         config: Option<ChatConfig>,
         parent_chat_id: Option<&str>,
-        provisional_tag: Option<String>,
-        lead_role_chat: bool,
+        role: Option<ProvisionalRole>,
     ) -> Result<(), WorkOutlineError> {
         match self.workspace.chat(chat_id).map_err(engine_error)? {
             Some(chat) => {
@@ -2449,15 +2439,14 @@ No active workers.");
                 }
                 Ok(())
             }
-            None => match provisional_tag {
-                Some(tag) => self.workspace.create_provisional_role_chat_under(
+            None => match role {
+                Some(ProvisionalRole { tag, keeps_parent }) => self.workspace.create_provisional_role_chat_under(
                     chat_id,
                     space_id,
                     config,
                     execution_root.to_owned(),
                     tag,
-                    // Only a Lead has a parent (its Manager); other roles start unparented.
-                    parent_chat_id.filter(|_| lead_role_chat).map(str::to_owned),
+                    parent_chat_id.filter(|_| keeps_parent).map(str::to_owned),
                 ),
                 None => self.workspace.create_chat_with_parent(
                     chat_id,

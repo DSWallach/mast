@@ -2222,6 +2222,26 @@ async fn launching_for_an_item_with_a_stopped_worker_continues_it_as_a_hand_off(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn launching_a_child_with_a_standing_role_reaches_the_lead_rules() {
+    let rig = rig().await;
+    let root = create_item(&rig, "role-root", "Coordinator", None).await;
+    let task = create_item(&rig, "role-task", "Slice", Some(&root)).await;
+    assign_chat(&rig, "role-root-assignment", CHAT, &root).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-role", SPACE, &rig.core.device_id);
+    let token = lease.token().to_owned();
+    // Only a Lead can be asked for.
+    let mut other = launch_args("role-manager", &task, "workspace-write");
+    other["standingRole"] = json!("manager");
+    let err = tool(&rig, &token, "chat_launch_child_for_item", other).await.unwrap_err();
+    assert!(err.contains("agent-tools/invalid") && err.contains("lead"), "{err}");
+    // The request reaches the Lead launch rules: this coordinator is no Manager.
+    let mut lead = launch_args("role-lead", &task, "read-only");
+    lead["standingRole"] = json!("lead");
+    let err = tool(&rig, &token, "chat_launch_child_for_item", lead).await.unwrap_err();
+    assert!(err.contains("Manager"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_child_started_for_a_descendant_item_gets_that_items_instructions() {
     let rig = rig().await;
     let root_a = create_item(&rig, "op-a", "Coordinator", None).await;

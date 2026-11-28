@@ -2774,6 +2774,282 @@ impl OrchestratorWakes {
                 );
             }
             let (report, truncated) = mast_proto::cap_worker_report(text);
+            // The digest goes after the cap, so a long report never cuts it.
+            let report = match &digest {
+                Some(digest) => format!("{report}\n{digest}"),
+                None => report,
+            };
+            // A Lead reports to its Manager as a bounded digest, never the
+            // whole report. Bounded last, so the appended lines count too.
+            let (report, truncated) = match self.inner.workspace.standing_role_of_chat(from) {
+                Some(role) if role.role == mast_proto::StandingRoleKind::Lead => (
+                    crate::lead_role::digest_for_manager(&role.scope_item_id, from, &report),
+                    truncated || report.len() > mast_proto::MAX_LEAD_DIGEST_TOKENS as usize * 4,
+                ),
+                _ => (report, truncated),
+            };
+            if !state.core.settings(&parent_id).wakes_for(WakeEventKind::WorkerReport) {
+                return Ok(PeerReportOutcome::ReportsOff);
+            }
+            let title = match report.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                Some(title) => format!("{title} [{peer}]"),
+                None => format!("worker on {peer}"),
+            };
+            let info = state.chats.entry(worker.clone()).or_default();
+            info.title = Some(title);
+            info.parent = Some(parent_id.clone());
+            let first = body.lines().next().unwrap_or_default();
+            let line = format!("{} — worker report: {}", label(&state, &worker), truncate(first, 120));
+            let mut event = make_event(
+                &mut state,
+                &worker,
+                WakeEventKind::WorkerReport,
+                format!("peerrep:{peer}:{}", report.id),
+                &line,
+                now,
+            );
+            event.id = mast_proto::derive_id(&format!("{peer}:{}", report.id), "peer-report-wake");
+            let rerouted = rerouted_from.as_deref().map(|from| format!(" Its parent chat {from} is archived, so it came to you as the Manager."));
+            event.report = Some(format!(
+                "[remote worker, chat {} on paired device {peer}: read it through that peer's Mast MCP server.{}]\n{body}",
+                report.chat_id,
+                rerouted.unwrap_or_default()
+            ));
+            state.core.record(&parent_id, event, now);
+        }
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.persist_held())
+            .await
+            .map_err(|error| format!("wake persistence worker failed: {error}"))??;
+        self.evaluate(&parent_id, false).await;
+        Ok(PeerReportOutcome::Queued)
+    }
+
+    /// Tell the parents a paired device's workers may be reporting to that the
+    /// device cannot be reached, so reports queued there are waiting. One notice
+    /// per `outage` per parent (the key repeats, so a replay is a no-op).
+    /// Returns how many parent chats on this device were told.
+    pub async fn note_peer_unreachable(&self, peer: &str, outage: &str, parents: &[String], detail: &str) -> usize {
+        let now = self.now();
+        let mut told = HashSet::new();
+        for parent in parents {
+            if !self.hosted_here(parent) || self.inner.workspace.chat(parent).ok().flatten().is_none_or(|c| c.archived) {
+                continue;
+            }
+            let worker = format!("peer:{peer}");
+            let mut state = lock(&self.inner.state);
+            if !state.core.settings(parent).wakes_for(WakeEventKind::WorkerReport) {
+                continue;
+            }
+            state.chats.entry(worker.clone()).or_default().title = Some(format!("paired device {peer}"));
+            let line = format!("{} — worker reports from {peer} are not arriving: the link to it is down", label(&state, &worker));
+            let mut event = make_event(&mut state, &worker, WakeEventKind::WorkerReport, format!("peerdown:{peer}:{outage}"), &line, now);
+            event.id = mast_proto::derive_id(&format!("{peer}:{outage}:{parent}"), "peer-unreachable-wake");
+            event.report = Some(format!(
+                "[The link to paired device {peer} is down: {detail}. Reports from your workers on it stay queued there and arrive once the link is back. Check the saved URL in `mast peer list`, or read a worker's chat through that peer's Mast MCP server.]"
+            ));
+            if state.core.record(parent, event, now) {
+                told.insert(parent.clone());
+            }
+        }
+        if !told.is_empty() {
+            let this = self.clone();
+            if let Ok(Err(error)) = tokio::task::spawn_blocking(move || this.persist_held()).await {
+                tracing::warn!(%error, "could not persist the peer-unreachable notice");
+            }
+            for parent in &told {
+                self.evaluate(parent, false).await;
+            }
+        }
+        told.len()
+    }
+
+    /// The live Manager chat on this device for the work item an archived chat
+    /// was assigned to, or the nearest ancestor item that has one.
+    fn manager_for_archived(&self, archived: &mast_proto::Chat) -> Option<String> {
+        let space = archived.space_id.as_deref()?;
+        let mut item = self.inner.workspace.chat_assigned_work_item(&archived.id, space)?;
+        for _ in 0..32 {
+            if let Some(manager) = self.inner.workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &item) {
+                let live = self.inner.workspace.chat(&manager).ok().flatten().is_some_and(|c| !c.archived);
+                return (live && self.hosted_here(&manager)).then_some(manager);
+            }
+            item = self.inner.workspace.effective_work_item_parent(space, &item)?;
+        }
+        None
+    }
+
+    /// Queue an authenticated intent through the same delivery path as a
+    /// worker report, retaining its typed identity for the durable receipt.
+    pub async fn report_final_handback(
+        &self,
+        intent: &FinalHandbackIntent,
+    ) -> Result<mast_proto::ReportToParentResult, String> {
+        if !self.inner.workspace.final_handback_is_locally_authenticated(intent) {
+            return Err("final handback has no local authentication receipt".into());
+        }
+        self.report_to_parent_inner(&intent.worker_chat_id, &intent.report, Some(intent), None).await
+    }
+
+    /// Retry locally authenticated intents after recovery. Unavailable
+    /// history or changed ownership is retained for a later explicit review.
+    pub async fn recover_final_handbacks(&self) {
+        self.recover_final_handbacks_for(None).await;
+    }
+
+    async fn recover_final_handbacks_for(&self, parent: Option<&str>) {
+        let workspace = self.inner.workspace.clone();
+        let Ok(intents) = tokio::task::spawn_blocking(move || workspace.locally_authenticated_final_handbacks()).await else {
+            tracing::warn!("could not load final handback recovery intents");
+            return;
+        };
+        for intent in intents {
+            if self.inner.cancel.is_cancelled() { break; }
+            if parent.is_some_and(|parent| parent != intent.parent_chat_id) {
+                continue;
+            }
+            if let Err(error) = self.report_final_handback(&intent).await {
+                tracing::warn!(%error, worker = %intent.worker_chat_id, "final handback remains pending");
+            }
+        }
+    }
+
+    async fn reconcile_final_handback_archives(&self) {
+        let this = self.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            let workspace = &this.inner.workspace;
+            for intent in workspace.locally_authenticated_final_handbacks() {
+                if this.inner.cancel.is_cancelled() {
+                    break;
+                }
+                if let Err(error) = this.archive_delivered_handback(&intent) {
+                    tracing::warn!(%error, worker = %intent.worker_chat_id, "could not archive final handback");
+                }
+            }
+        }).await {
+            tracing::warn!(%error, "final handback archive worker failed");
+        }
+    }
+
+    fn archive_delivered_handback(&self, intent: &FinalHandbackIntent) -> Result<(), crate::EngineError> {
+        let turns = &self.inner.event_turns;
+        let expected = handback_identity(intent);
+        if intent.keep_chat || !matches!(turns.final_handback_receipt(&expected), Ok(true)) {
+            return Ok(());
+        }
+        let workspace = &self.inner.workspace;
+        if !workspace.final_handback_archive_pending(intent) {
+            return Ok(());
+        }
+        let host = &self.inner.doc_host;
+        let worker = &intent.worker_chat_id;
+        let handle = match host.loaded(worker) {
+            Some(handle) => handle,
+            None if host.scheduled_run_doc(worker)?.is_some() => host.open(worker)?,
+            None => return Ok(()),
+        };
+        let Ok(_drain) = handle.drain_lock.try_lock() else {
+            return Ok(());
+        };
+        let doc = handle.doc();
+        let archived = workspace.archive_final_handback_if(intent, &handle.work_ingress, || {
+            let delivered = matches!(turns.final_handback_receipt(&expected), Ok(true));
+            let queued = handle.has_relayed_work()
+                || self.inner.sessions.turn_in_flight(worker)
+                || self.inner.sessions.has_any_pending_input(worker)
+                || self.inner.sessions.has_interrupted_turn(worker)
+                || DocHost::session_doc_has_queued_turn(doc)?;
+            let no_owned_subagents = !queued && !doc.read_entries()?.iter()
+                .flat_map(|entry| &entry.parts)
+                .any(|part| {
+                    use mast_doc::{MessagePart, SubagentStatus};
+                    matches!(part, MessagePart::Tool {
+                        subagent_status: Some(SubagentStatus::Running),
+                        ..
+                    } | MessagePart::Tool {
+                        subagent_ref: Some(_),
+                        subagent_status: None,
+                        ..
+                    })
+                });
+            Ok((delivered, queued, no_owned_subagents))
+        })?;
+        drop(_drain);
+        if archived {
+            workspace.persist_registry_now()?;
+        }
+        Ok(())
+    }
+
+    async fn report_to_parent_inner(
+        &self,
+        from: &str,
+        text: &str,
+        final_intent: Option<&FinalHandbackIntent>,
+        digest: Option<String>,
+    ) -> Result<mast_proto::ReportToParentResult, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("text is empty".into());
+        }
+        let (parent_id, truncated) = {
+            let mut state = lock(&self.inner.state);
+            if let Some(intent) = final_intent {
+                if self.inner.event_turns.final_handback_receipt(&handback_identity(intent))? {
+                    return Ok(mast_proto::ReportToParentResult {
+                        parent_chat_id: intent.parent_chat_id.clone(),
+                        delivery: "delivered".into(),
+                        held_reason: None,
+                        truncated: false,
+                    });
+                }
+                if lock(&self.inner.event_turns.persistence).as_ref().is_some_and(|persistence| {
+                    persistence.unavailable.contains(&intent.parent_chat_id)
+                }) {
+                    return Err("final handback recipient recovery is unavailable".into());
+                }
+            }
+            let worker = self
+                .inner
+                .workspace
+                .chat(from)
+                .ok()
+                .flatten()
+                .ok_or_else(|| format!("unknown chat {from}"))?;
+            if final_intent.is_some() && worker.device_id != self.inner.doc_host.device_id() {
+                return Err("worker is hosted on another device; final handback remains pending".into());
+            }
+            let parent_id = worker
+                .parent_chat_id
+                .clone()
+                .filter(|p| p != from)
+                .ok_or("this chat has no parent chat, so there is nobody to report to")?;
+            if let Some(intent) = final_intent
+                && (intent.parent_chat_id != parent_id || worker.space_id.as_deref() != Some(intent.space_id.as_str()))
+            {
+                return Err("worker parent or Space changed since final handback".into());
+            }
+            let parent = self
+                .inner
+                .workspace
+                .chat(&parent_id)
+                .ok()
+                .flatten()
+                .ok_or("the parent chat no longer exists")?;
+            if parent.archived {
+                return Err("the parent chat is archived; hand off or unarchive it before reporting".into());
+            }
+            if parent.space_id != worker.space_id {
+                return Err("the parent chat is in another Space; reports never cross Spaces".into());
+            }
+            if parent.device_id != self.inner.doc_host.device_id() {
+                return Err(
+                    "the parent chat runs on another device; worker reports are only delivered \
+                     by the device that hosts the parent (read_chat / Required Actions still work)"
+                        .into(),
+                );
+            }
+            let (report, truncated) = mast_proto::cap_worker_report(text);
             // A Lead reports to its Manager as a bounded digest, never the
             // whole report.
             let (report, truncated) = match self.inner.workspace.standing_role_of_chat(from) {

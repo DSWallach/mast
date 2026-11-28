@@ -19,6 +19,7 @@ use mast_proto::{
 };
 
 use crate::path_leases::{Lease, path_covered_by};
+use crate::workspace_host::WorkspaceHost;
 
 /// What the policy needs to know about one chat.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +41,8 @@ pub enum LeadRefusal {
     /// A Lead's prompt (its context packet) is over [`MAX_LEAD_CONTEXT_TOKENS`].
     ContextTooLarge { tokens: u32 },
     BudgetExceeded { what: &'static str, asked: u64, left: u64 },
+    /// The parent has a budget, so the child must name its own share.
+    BudgetUnspecified { what: &'static str },
     /// A Worker's `ownedPaths` entry is outside its Lead's subtree lease.
     PathOutsideLease { path: String },
 }
@@ -60,6 +63,9 @@ impl std::fmt::Display for LeadRefusal {
             ),
             Self::BudgetExceeded { what, asked, left } => {
                 write!(f, "The Lead's {what} budget of {asked} exceeds the {left} left in its parent's")
+            }
+            Self::BudgetUnspecified { what } => {
+                write!(f, "The parent has a {what} budget, so this item needs its own {what} budget")
             }
             Self::PathOutsideLease { path } => {
                 write!(f, "ownedPaths `{path}` is outside the Lead's subtree lease")
@@ -126,6 +132,29 @@ pub fn check_worker_parent(
     Ok(Some(parent.to_owned()))
 }
 
+/// The policy's view of a chat in the registry.
+pub fn chat_node(workspace: &WorkspaceHost, chat: &str) -> Option<ChatNode> {
+    let row = workspace.chat(chat).ok().flatten()?;
+    Some(ChatNode {
+        parent: workspace.live_parent(chat).or(row.parent_chat_id),
+        role: workspace.standing_role_of_chat(chat).map(|role| role.role),
+    })
+}
+
+/// Admit a new plain chat (`new_chat`) under `parent`: the one check every
+/// way of starting a child chat goes through. Returns the Lead chat it will
+/// belong to, or `None` when no Lead is above it.
+pub fn admit_child(workspace: &WorkspaceHost, parent: &str, new_chat: &str) -> Result<Option<String>, LeadRefusal> {
+    let live_workers = workspace
+        .read_chats()
+        .unwrap_or_default()
+        .iter()
+        .filter(|chat| chat.parent_chat_id.as_deref() == Some(parent) && !chat.archived && chat.id != new_chat)
+        .filter(|chat| workspace.standing_role_of_chat(&chat.id).is_none())
+        .count();
+    check_worker_parent(parent, &|id| chat_node(workspace, id), live_workers)
+}
+
 /// A Lead's prompt is its context packet: refuse one over the cap.
 pub fn check_context_size(prompt: &str) -> Result<(), LeadRefusal> {
     let tokens = approx_tokens(prompt);
@@ -133,9 +162,9 @@ pub fn check_context_size(prompt: &str) -> Result<(), LeadRefusal> {
 }
 
 /// Check a requested budget fits what is left of `parent` after `siblings`.
-/// An unspecified limit on the parent is unlimited. Returns the budget the
-/// child gets: the request, or, when it names no limit but the parent has one,
-/// everything the siblings left.
+/// An unspecified limit on the parent is unlimited. A child that names no
+/// limit where its parent has one is refused: the budget is a share the child
+/// declares, and Mast does not guess it. Returns the budget the child holds.
 pub fn carve_budget(
     parent: &ItemBudget,
     siblings: &[ItemBudget],
@@ -152,7 +181,7 @@ pub fn carve_budget(
         match request {
             Some(asked) if asked > left => Err(LeadRefusal::BudgetExceeded { what, asked, left }),
             Some(asked) => Ok(Some(asked)),
-            None => Ok(Some(left)),
+            None => Err(LeadRefusal::BudgetUnspecified { what }),
         }
     }
     let spent = |f: fn(&ItemBudget) -> Option<u64>| siblings.iter().filter_map(f).sum::<u64>();
@@ -284,7 +313,10 @@ mod tests {
             carve_budget(&parent, &used, &ask(Some(401), None)),
             Err(LeadRefusal::BudgetExceeded { what: "token", asked: 401, left: 400 })
         );
-        assert_eq!(carve_budget(&parent, &used, &ask(None, None)).unwrap(), ask(Some(400), Some(40)));
+        assert_eq!(
+            carve_budget(&parent, &used, &ask(None, Some(1))),
+            Err(LeadRefusal::BudgetUnspecified { what: "token" })
+        );
         // An unspecified parent limit is unlimited.
         assert_eq!(carve_budget(&ItemBudget::default(), &used, &ask(Some(9_999), None)).unwrap(), ask(Some(9_999), None));
     }

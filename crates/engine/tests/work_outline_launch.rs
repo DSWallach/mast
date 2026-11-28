@@ -6577,11 +6577,16 @@ async fn the_manager_hears_a_lead_digest_and_never_a_leaf_workers_events() {
     let to_manager = rig.core.orchestrator_wakes.status(&manager);
     // The Lead's own routine events may reach the Manager; nothing from the leaf does.
     assert!(to_manager.held.iter().chain(&to_manager.recent).all(|e| e.worker_chat_id != worker && !e.summary.contains("LEAF-NOISE")), "{to_manager:?}");
-    // Even with the Lead archived the leaf does not fall through to the Manager.
+    // Even with the Lead archived the leaf does not fall through to the Manager:
+    // an error is sent while the Lead is archived.
     rig.core.workspace.set_chat_archived(&lead, true).unwrap();
     let chats = rig.core.workspace.read_chats().unwrap();
     rig.core.orchestrator_wakes.ingest_chats(&chats).await;
+    rig.core.orchestrator_wakes.ingest_sessions(&[leaf_session(&worker, mast_proto::SessionStatus::Errored)]).await;
+    assert_manager_hears_nothing_of(&rig, &manager, &worker);
     rig.core.workspace.set_chat_archived(&lead, false).unwrap();
+    let chats = rig.core.workspace.read_chats().unwrap();
+    rig.core.orchestrator_wakes.ingest_chats(&chats).await;
     // The Lead reports up: one bounded digest.
     let long = format!("Slice merged, 2 PRs open.\n{}", "internal detail ".repeat(3_000));
     rig.core.orchestrator_wakes.report_to_parent(&lead, &long).await.unwrap();
@@ -6593,43 +6598,143 @@ async fn the_manager_hears_a_lead_digest_and_never_a_leaf_workers_events() {
     assert!(report.contains("Slice merged, 2 PRs open."));
     assert!(mast_proto::approx_tokens(&report) <= mast_proto::MAX_LEAD_DIGEST_TOKENS, "{} bytes", report.len());
     assert!(!report.contains("LEAF-NOISE"));
+    assert_manager_hears_nothing_of(&rig, &manager, &worker);
+    rig.core.shutdown().await;
+}
+
+fn leaf_session(chat: &str, status: mast_proto::SessionStatus) -> mast_proto::Session {
+    mast_proto::Session {
+        last_completed_turn: None,
+        awaiting_input: None,
+        last_turn_tool_failures: None,
+        todo_progress: None,
+        chat_id: chat.into(),
+        device_id: "d".into(),
+        status,
+        started_at: None,
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+/// Nothing from `worker`, and no leaf text, in any event the Manager holds or has seen.
+fn assert_manager_hears_nothing_of(rig: &Rig, manager: &str, worker: &str) {
+    let status = rig.core.orchestrator_wakes.status(manager);
+    for e in status.held.iter().chain(&status.recent) {
+        assert!(e.worker_chat_id != worker, "{e:?}");
+        assert!(!e.summary.contains("LEAF-NOISE"), "{e:?}");
+        assert!(e.report.as_deref().is_none_or(|r| !r.contains("LEAF-NOISE")), "{e:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leaf_approval_urgent_approval_and_error_never_reach_the_manager() {
+    use mast_engine::sessions::WorkerSignal;
+    let (rig, manager) = lead_rig().await;
+    let slice = lead_item(&rig, "Slice", None, json!({})).await;
+    let lead = start_lead(&rig, &slice, "lead", Some(&manager)).await.unwrap();
+    // One plain leaf, one autonomous leaf (`requiredReport`) whose approval is urgent.
+    let plain = lead_item(&rig, "Plain leaf", Some(&slice), json!({})).await;
+    let plain_worker = start_worker(&rig, &plain, "plain-leaf", &lead).await.unwrap();
+    let auto = lead_item(&rig, "Auto leaf", Some(&slice), json!({ "requiredReport": true })).await;
+    let auto_worker = start_worker(&rig, &auto, "auto-leaf", &lead).await.unwrap();
+    let chats = rig.core.workspace.read_chats().unwrap();
+    rig.core.orchestrator_wakes.ingest_chats(&chats).await;
+    let question = |command: &str| mast_proto::UserInputQuestion {
+        id: "q1".into(),
+        header: "Approve command".into(),
+        question: format!("Run `{command}` LEAF-NOISE?"),
+        options: vec!["Yes".into(), "No".into()],
+        multi_select: false,
+        allow_custom: false,
+        approval_scope: None,
+        command_approval: Some(mast_proto::CommandApproval { command: command.into(), cwd: None, reason: None, sandbox_permissions: None }),
+        permission: None,
+    };
+    for (chat, request) in [(&plain_worker, "plain-req"), (&auto_worker, "auto-req")] {
+        let input = mast_proto::AwaitingInput { request_id: request.into(), questions: vec![question("cargo clean")] };
+        rig.core.orchestrator_wakes.ingest_worker_signal(WorkerSignal::Input { chat_id: chat.clone(), input }).await;
+        rig.core.orchestrator_wakes.ingest_sessions(&[leaf_session(chat, mast_proto::SessionStatus::Errored)]).await;
+    }
+    // Both reached the Lead (the parent), neither the Manager.
+    let to_lead = rig.core.orchestrator_wakes.status(&lead);
+    for worker in [&plain_worker, &auto_worker] {
+        assert!(to_lead.held.iter().chain(&to_lead.recent).any(|e| &e.worker_chat_id == worker), "{worker}: {to_lead:?}");
+        assert_manager_hears_nothing_of(&rig, &manager, worker);
+    }
     rig.core.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_lead_handed_off_keeps_its_role_slice_and_workers() {
+async fn a_lead_digest_stays_bounded_on_the_tool_report_path() {
     let (rig, manager) = lead_rig().await;
-    let slice = lead_item(&rig, "Slice", None, json!({ "ownedPaths": ["crates/engine/**"] })).await;
+    let slice = lead_item(&rig, "Slice", None, json!({})).await;
     let lead = start_lead(&rig, &slice, "lead", Some(&manager)).await.unwrap();
-    settle(&rig, &lead).await;
-    let leaf = lead_item(&rig, "Leaf", Some(&slice), json!({ "ownedPaths": ["crates/engine/src/a.rs"] })).await;
-    let worker = start_worker(&rig, &leaf, "leaf", &lead).await.unwrap();
-    // The existing hand-off path, as an agent calls it. It adds no Lead and
-    // carries the Lead's read-only sandbox and parent over.
-    rig.client
-        .call(methods::HAND_OFF_ORCHESTRATOR, json!({ "chatId": lead, "summary": "Continue the slice", "operationId": "lead-handoff" }))
-        .await
-        .unwrap();
-    wait_for(|| rig.core.workspace.standing_role_chat(Lead, &slice).is_some_and(|chat| chat != lead), "Lead successor").await;
-    let successor = rig.core.workspace.standing_role_chat(Lead, &slice).unwrap();
-    let chat = rig.core.workspace.chat(&successor).unwrap().unwrap();
-    assert_eq!(chat.config.as_ref().unwrap().sandbox, SandboxLevel::ReadOnly);
-    assert_eq!(chat.parent_chat_id.as_deref(), Some(manager.as_str()));
-    assert!(rig.core.workspace.chat(&lead).unwrap().unwrap().archived);
-    assert_eq!(rig.core.workspace.standing_role(Lead, &slice).unwrap().chain, vec![lead.clone(), successor.clone()]);
-    assert_eq!(rig.core.workspace.live_parent(&worker).as_deref(), Some(successor.as_str()), "the Worker follows its Lead");
-    // The Worker's reports now reach the successor, still never the Manager.
     let chats = rig.core.workspace.read_chats().unwrap();
     rig.core.orchestrator_wakes.ingest_chats(&chats).await;
-    rig.core.orchestrator_wakes.report_to_parent(&worker, "LEAF-NOISE after handoff").await.unwrap();
-    let to_manager = rig.core.orchestrator_wakes.status(&manager);
-    assert!(to_manager.held.iter().chain(&to_manager.recent).all(|e| e.worker_chat_id != worker), "{to_manager:?}");
-    let to_successor = rig.core.orchestrator_wakes.status(&successor);
-    assert!(to_successor.held.iter().any(|e| e.worker_chat_id == worker), "{to_successor:?}");
-    // The role is still one Lead: a fifth item has room for three more.
-    for n in 0..3 {
-        let item = lead_item(&rig, &format!("More {n}"), None, json!({ "ownedPaths": [format!("crates/m{n}/**")] })).await;
-        start_lead(&rig, &item, &format!("more-{n}"), Some(&manager)).await.unwrap();
+    let long = format!("Slice merged.\n{}", "internal detail ".repeat(3_000));
+    rig.core.orchestrator_wakes.report_to_parent_with(&lead, &long, None).await.unwrap();
+    let held = rig.core.orchestrator_wakes.status(&manager).held;
+    let report = held.iter().find(|e| e.worker_chat_id == lead && e.report.is_some()).and_then(|e| e.report.clone()).expect("a digest");
+    assert!(report.starts_with("[Lead digest, item "), "{report}");
+    assert!(mast_proto::approx_tokens(&report) <= mast_proto::MAX_LEAD_DIGEST_TOKENS, "{} bytes", report.len());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lead_can_start_workers_through_create_chat_only_within_the_caps() {
+    let (rig, manager) = lead_rig().await;
+    let slice = lead_item(&rig, "Slice", None, json!({})).await;
+    let lead = start_lead(&rig, &slice, "lead", Some(&manager)).await.unwrap();
+    let make = |id: String, parent: String| {
+        let client = &rig.client;
+        async move {
+            client
+                .call(methods::MUTATE, json!({ "op": "createChat", "chatId": id, "spaceId": SPACE, "deviceId": DEVICE, "parentChatId": parent }))
+                .await
+        }
+    };
+    for n in 0..6 {
+        make(format!("plain-{n}"), lead.clone()).await.unwrap();
     }
+    let seventh = format!("{:?}", make("plain-6".into(), lead.clone()).await.unwrap_err());
+    assert!(seventh.contains("already has 6 Workers"), "{seventh}");
+    let deeper = format!("{:?}", make("plain-deep".into(), "plain-0".into()).await.unwrap_err());
+    assert!(deeper.contains("depth 3 is over the limit of 2"), "{deeper}");
+    // A Manager's plain children are not a Lead's concern.
+    make("under-manager".into(), manager.clone()).await.unwrap();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_under_a_budgeted_lead_must_name_its_own_budget() {
+    let (rig, manager) = lead_rig().await;
+    let slice = lead_item(&rig, "Slice", None, json!({ "itemBudget": { "maxTokens": 500 } })).await;
+    let lead = start_lead(&rig, &slice, "lead", Some(&manager)).await.unwrap();
+    let leaf = lead_item(&rig, "Leaf", Some(&slice), json!({})).await;
+    let refused = start_worker(&rig, &leaf, "leaf", &lead).await.unwrap_err();
+    assert!(refused.message.contains("needs its own token budget"), "{}", refused.message);
+    let named = lead_item(&rig, "Named", Some(&slice), json!({ "itemBudget": { "maxTokens": 200 } })).await;
+    start_worker(&rig, &named, "named", &lead).await.unwrap();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_leads_own_workers_are_exempt_from_its_subtree_lease() {
+    let (rig, manager) = lead_rig().await;
+    rig.client
+        .call(methods::WORK_OUTLINE_MUTATE, json!({ "op": "setWorkerAutomation", "spaceId": SPACE, "workerWorktrees": true, "operationId": "enable-worker-worktrees" }))
+        .await
+        .unwrap();
+    git(&rig.repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(&rig.repo, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    let class = json!({ "role": "implementer", "complexity": "standard" });
+    let slice = lead_item(&rig, "Slice", None, json!({ "taskClass": class, "ownedPaths": ["crates/engine/**"] })).await;
+    let lead = start_lead(&rig, &slice, "lead", Some(&manager)).await.unwrap();
+    let own = lead_item(&rig, "Own", Some(&slice), json!({ "taskClass": class, "ownedPaths": ["crates/engine/src/a.rs"] })).await;
+    start_worker(&rig, &own, "own", &lead).await.unwrap();
+    // A Manager-parented Worker on another leaf in the slice is not exempt.
+    let other = lead_item(&rig, "Other", Some(&slice), json!({ "taskClass": class, "ownedPaths": ["crates/engine/src/b.rs"] })).await;
+    let refused = start_worker(&rig, &other, "other", &manager).await.unwrap_err();
+    assert!(refused.message.contains("Path lease"), "{}", refused.message);
     rig.core.shutdown().await;
 }
