@@ -18,6 +18,7 @@ fn write_executable(path: &Path, body: &str) {
 
 #[tokio::test]
 async fn pr_search_uses_login_shell_path_and_disables_prompts() {
+    crate::require_process_per_test("pr_ticket_cache_login_shell::pr_search_uses_login_shell_path_and_disables_prompts");
     let dir = tempfile::tempdir().unwrap();
     let hostile_checkout = dir.path().join("hostile-checkout");
     std::fs::create_dir(&hostile_checkout).unwrap();

@@ -1,7 +1,29 @@
-//! Engine integration suite. Run with nextest for process isolation.
+//! Engine integration suite. Run with nextest for process isolation: several tests set
+//! process-wide environment variables, so plain `cargo test` of the whole binary fails.
 
 #[path = "../../../../test_support/isolation.rs"]
 mod test_isolation;
+
+/// Fails fast, before it touches the environment, when a test that sets process-wide environment
+/// variables (PATH, HOME, SHELL, the Work Outline kill switch) would run inside a process that other
+/// tests share. Plain `cargo test` runs every test of this binary in one process, so those variables
+/// leak into hundreds of unrelated tests (git no longer resolves, Work Outline writes are refused).
+/// nextest gives each test its own process and sets `NEXTEST`. A narrow `cargo test --test engine
+/// <filter>` that does not select these tests is unaffected. To run one of them alone under libtest,
+/// set `MAST_ALLOW_SHARED_PROCESS_ENV_TESTS=1`.
+pub(crate) fn require_process_per_test(test: &str) {
+    if std::env::var_os("NEXTEST").is_some()
+        || std::env::var_os("MAST_ALLOW_SHARED_PROCESS_ENV_TESTS").is_some()
+    {
+        return;
+    }
+    panic!(
+        "{test} sets process-wide environment variables and must run in its own process. Run the \
+         engine suite with `cargo nextest run -p mast-engine` (see \
+         docs/internal/testing/baseline-2026-11-28.md). To run this one test alone under `cargo \
+         test`, set MAST_ALLOW_SHARED_PROCESS_ENV_TESTS=1 and pass `--exact`."
+    );
+}
 
 #[path = "../acp_lifecycle.rs"]
 mod acp_lifecycle;

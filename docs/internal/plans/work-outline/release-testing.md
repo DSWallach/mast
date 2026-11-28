@@ -53,6 +53,13 @@ in `crates/engine/tests/it/main.rs`. Register each new integration file there;
 initializer runs once per binary. nextest still launches a separate process for each
 test, preserving isolation for tests that change environment variables.
 
+**Full-suite baseline command: `cargo nextest run -p mast-doc -p mast-engine -p mast-mcp --no-fail-fast`.**
+Do not use plain `cargo test` for the whole engine binary: its tests share one process, and tests that set
+`PATH`, `HOME`, `SHELL` or `MAST_DISABLE_WORK_OUTLINE_WRITES` make hundreds of others fail (329 failures
+against 5 under nextest at v0.3.0; see `docs/internal/testing/baseline-2026-11-28.md`). Those tests now fail
+fast with that message under plain `cargo test`; `MAST_ALLOW_SHARED_PROCESS_ENV_TESTS=1` runs one alone.
+`provenance_budget` asserts exact git-spawn counts, so nextest runs it exclusively.
+
 Run a module with `cargo nextest run -p mast-engine -E 'test(/^agent_tools::/)'`.
 For libtest, use `cargo test -p mast-engine --test engine agent_tools:: -- --test-threads=1`.
 The single thread matters because some integration tests change process-wide state.

@@ -32,6 +32,7 @@ fn run_git(cwd: &Path, args: &[&str]) {
 
 #[tokio::test]
 async fn github_cli_on_login_shell_path_only_resolves_pull_request() {
+    crate::require_process_per_test("github_cli_login_shell::github_cli_on_login_shell_path_only_resolves_pull_request");
     let dir = tempfile::tempdir().unwrap();
     let direct_bin = dir.path().join("direct-bin");
     std::fs::create_dir(&direct_bin).unwrap();

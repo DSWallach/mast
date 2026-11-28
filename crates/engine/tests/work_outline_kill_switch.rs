@@ -11,6 +11,7 @@ use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn kill_switch_refuses_writes_and_keeps_reads() {
+    crate::require_process_per_test("work_outline_kill_switch::kill_switch_refuses_writes_and_keeps_reads");
     // SAFETY: this binary has exactly one test, so nothing reads the
     // environment concurrently.
     unsafe { std::env::set_var(mast_proto::work_outline::DISABLE_WRITES_ENV, "1") };

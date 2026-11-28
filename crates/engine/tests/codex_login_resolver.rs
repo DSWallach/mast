@@ -9,6 +9,7 @@ use mast_proto::HarnessId;
 
 #[tokio::test]
 async fn codex_login_resolves_override_and_adds_its_directory_to_child_path() {
+    crate::require_process_per_test("codex_login_resolver::codex_login_resolves_override_and_adds_its_directory_to_child_path");
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("custom-bin");
     std::fs::create_dir(&bin).unwrap();
