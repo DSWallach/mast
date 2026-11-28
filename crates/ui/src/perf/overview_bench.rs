@@ -124,9 +124,21 @@ fn snapshot(roots: usize) -> WorkOutlineSnapshot {
     snap
 }
 
-#[gpui::test]
-#[ignore = "benchmark: run with --ignored --nocapture"]
-fn bench_overview_250_chats_40_items(cx: &mut gpui::TestAppContext) {
+/// One `SAMPLE` line per metric, in milliseconds, for `scripts`-free median/MAD
+/// post-processing: `SAMPLE overview | <chats> | <metric> | ms=<mean>`.
+fn sample(chats: usize, metric: &str, ms: f64) {
+    eprintln!("SAMPLE overview | {chats} | {metric} | ms={ms:.3}");
+}
+
+fn mean_ms(n: usize, mut f: impl FnMut(usize)) -> f64 {
+    let t = std::time::Instant::now();
+    for i in 0..n {
+        f(i);
+    }
+    t.elapsed().as_secs_f64() * 1000.0 / n as f64
+}
+
+fn run_overview_bench(cx: &mut gpui::TestAppContext, chats: usize) {
     let dir = tempfile::tempdir().unwrap();
     cx.update(|cx| {
         gpui_base::init(cx);
@@ -136,7 +148,7 @@ fn bench_overview_250_chats_40_items(cx: &mut gpui::TestAppContext) {
     let state = cx.new(|_| AppState::new());
     state.update(cx, |state, _| {
         state.data_dir = Some(dir.path().to_path_buf());
-        state.chats = (0..250).map(chat_row).collect();
+        state.chats = (0..chats).map(chat_row).collect();
         state.spaces = vec![mast_proto::Space {
             id: SPACE.into(),
             device_id: "local".into(),
@@ -177,33 +189,60 @@ fn bench_overview_250_chats_40_items(cx: &mut gpui::TestAppContext) {
         o.view_mode = OverviewMode::List;
         o.rows_dirty = true;
     });
-    measure("overview", "first draw (List)", || draw(vcx));
-    measure_n("overview", "rows() forced rebuild", 20, |_| {
-        overview.update(vcx, |o, cx| {
-            o.rows_dirty = true;
-            std::hint::black_box(o.rows(cx));
-        });
-    });
-    measure_n("overview", "rows() cached", 200, |_| {
-        overview.update(vcx, |o, cx| {
-            std::hint::black_box(o.rows(cx));
-        });
-    });
-    measure_n("overview", "List redraw (clean)", 30, |_| draw(vcx));
-    measure_n("overview", "List redraw (rows dirty)", 20, |_| {
-        overview.update(vcx, |o, _| o.rows_dirty = true);
-        draw(vcx);
-    });
+    // Cold open: the first List draw, which builds rows and the presentation.
+    let cold = mean_ms(1, |_| draw(vcx));
+    sample(chats, "cold open", cold);
+    // Idle redraw: nothing changed, the presentation is rebuilt anyway.
+    draw(vcx);
+    sample(chats, "idle redraw", mean_ms(40, |_| draw(vcx)));
+    // Scroll: wheel the list down a few rows per frame, then back up.
+    sample(
+        chats,
+        "scroll",
+        mean_ms(40, |i| {
+            let dy = if i < 20 { 90.0 } else { -90.0 };
+            overview.update(vcx, |o, cx| {
+                o.list.scroll_by(px(dy));
+                cx.notify();
+            });
+            draw(vcx);
+        }),
+    );
+    // Grouped reorder: group by repo, then move one chat to the top each frame.
     overview.update(vcx, |o, cx| {
-        o.view_mode = OverviewMode::Outline;
+        o.active_groups = vec![GroupDimension::Repo];
+        o.rows_dirty = true;
         cx.notify();
     });
-    measure("overview", "first draw (Outline)", || draw(vcx));
-    measure_n("overview", "Outline redraw (clean)", 30, |_| draw(vcx));
-    measure_n("overview", "Outline redraw (rows dirty)", 20, |_| {
-        overview.update(vcx, |o, _| o.rows_dirty = true);
-        draw(vcx);
-    });
+    draw(vcx);
+    sample(
+        chats,
+        "grouped reorder",
+        mean_ms(20, |i| {
+            state.update(vcx, |state, cx| {
+                let chat = &mut state.chats[(i * 7) % chats];
+                chat.last_message_at = Some(Utc::now() + chrono::Duration::days(1 + i as i64));
+                cx.notify();
+            });
+            overview.update(vcx, |o, cx| {
+                o.rows_dirty = true;
+                cx.notify();
+            });
+            draw(vcx);
+        }),
+    );
+}
+
+#[gpui::test]
+#[ignore = "benchmark: run with --ignored --nocapture"]
+fn bench_overview_250_chats_40_items(cx: &mut gpui::TestAppContext) {
+    run_overview_bench(cx, 250);
+}
+
+#[gpui::test]
+#[ignore = "benchmark: run with --ignored --nocapture"]
+fn bench_overview_1000_chats_40_items(cx: &mut gpui::TestAppContext) {
+    run_overview_bench(cx, 1000);
 }
 
 /// Compact single-chat rows (on by default in existing profiles) have no status word; a chat
