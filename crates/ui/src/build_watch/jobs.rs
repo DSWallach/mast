@@ -404,7 +404,9 @@ fn row_of(job: &BuildJobView, now_ms: i64, chat_title: Option<String>) -> PanelR
             _ => String::new(),
         },
     };
-    let detail = (!is_active(job.state) && job.state != BuildJobState::Succeeded)
+    // The failure report of a finished job, or the reason an unfinished one is not moving
+    // (`host unreachable; retrying`, `waiting for cargo lock`).
+    let detail = (job.state != BuildJobState::Succeeded)
         .then(|| {
             job.summary
                 .as_deref()
@@ -651,6 +653,19 @@ mod tests {
         let mut killed = job("k", "a", BuildJobState::Failed);
         killed.signal = Some(9);
         assert_eq!(row_of(&killed, 0, None).status, "failed \u{b7} signal 9");
+    }
+
+    #[test]
+    fn a_running_job_shows_why_it_is_not_moving() {
+        let mut running = job("j", "a", BuildJobState::Running);
+        running.summary = Some("host unreachable; retrying".into());
+        assert_eq!(
+            row_of(&running, 0, None).detail.as_deref(),
+            Some("host unreachable; retrying")
+        );
+        let mut passed = job("p", "a", BuildJobState::Succeeded);
+        passed.summary = Some("all good".into());
+        assert_eq!(row_of(&passed, 0, None).detail, None);
     }
 
     #[test]
