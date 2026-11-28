@@ -11,9 +11,9 @@ const NOTICE_LIFETIME: Duration = Duration::from_secs(6);
 #[derive(Clone)]
 pub(super) struct ShellNotice {
     id: u64,
-    text: SharedString,
+    pub(super) text: SharedString,
     /// A label and the chat it opens.
-    action: Option<(SharedString, String)>,
+    pub(super) action: Option<(SharedString, String)>,
 }
 
 impl Shell {

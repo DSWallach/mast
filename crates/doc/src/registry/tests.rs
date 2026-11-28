@@ -441,6 +441,22 @@ fn the_stale_parent_repair_is_idempotent_and_leaves_other_chats_alone() {
 }
 
 #[test]
+fn a_hand_off_successor_reads_back_the_chat_it_continues() {
+    let mut doc = chain_doc(&[("a", None, false), ("b", None, false)]);
+    assert_eq!(doc.chat("b").unwrap().unwrap().hand_off_from, None);
+    doc.hand_off_chat_children("a", "b", "a", 1).unwrap();
+    assert_eq!(doc.chat("b").unwrap().unwrap().hand_off_from.as_deref(), Some("a"));
+    assert_eq!(doc.chat("a").unwrap().unwrap().hand_off_from, None);
+    // A chat payload from before the field existed still reads.
+    let old: mast_proto::Chat = serde_json::from_value({
+        let mut value = serde_json::to_value(doc.chat("a").unwrap().unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("handOffFrom");
+        value
+    }).unwrap();
+    assert_eq!(old.hand_off_from, None);
+}
+
+#[test]
 fn hand_off_chat_children_refuses_archived_cross_space_and_child() {
     let mut doc = RegistryDoc::new("dev-a");
     for (id, space, parent, archived) in [

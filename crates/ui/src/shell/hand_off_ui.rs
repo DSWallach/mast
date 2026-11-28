@@ -942,4 +942,84 @@ mod tests {
             assert!(!dialog.submitting);
         });
     }
+
+    fn successor_reply(chat: &str) -> serde_json::Value {
+        serde_json::json!({"chatId": chat, "messageId":"m", "commandId":"c", "executionRoot":"/work", "state":"queued"})
+    }
+
+    #[gpui::test]
+    fn an_archived_chat_finds_the_successor_its_hand_off_made(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        shell.update(cx, |shell, cx| {
+            assert_eq!(shell.hand_off_successor(CHAT_API, cx), None);
+            shell.state.update(cx, |state, _| {
+                state.chats.iter_mut().find(|chat| chat.id == CHAT_API).unwrap().archived = true;
+                state.chats.iter_mut().find(|chat| chat.id == CHAT_UI).unwrap().hand_off_from = Some(CHAT_API.into());
+            });
+            assert_eq!(shell.hand_off_successor(CHAT_API, cx).as_deref(), Some(CHAT_UI));
+            // A chat nothing was handed off from, and the successor itself, have none.
+            assert_eq!(shell.hand_off_successor(CHAT_UI, cx), None);
+        });
+    }
+
+    #[gpui::test]
+    fn a_successful_hand_off_opens_the_successor_and_shows_a_notice_with_open(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        let actions = crate::work_outline::actions::WorkOutlineActions::scripted(Arc::new(|_, _| Ok(successor_reply("successor"))));
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| state.work_outline_actions_override = Some(actions));
+            shell.open_hand_off(CHAT_API.into(), cx);
+            shell.submit_hand_off(cx);
+        });
+        cx.run_until_parked();
+        super::super::chat_item_tests::draw(cx);
+        shell.read_with(cx, |shell, _| {
+            assert!(shell.work_outline_modal.is_none());
+            let notice = shell.notice.as_ref().expect("a notice");
+            assert_eq!(notice.text.as_ref(), "Handed off to a new chat");
+            assert_eq!(notice.action.as_ref().map(|(label, chat)| (label.as_ref(), chat.as_str())), Some(("Open", "successor")));
+        });
+        assert!(cx.debug_bounds("shell-notice").is_some());
+        assert!(cx.debug_bounds("shell-notice-action").is_some());
+        // A second notice replaces the first.
+        shell.update(cx, |shell, cx| shell.show_notice("Another", None, cx));
+        shell.read_with(cx, |shell, _| assert_eq!(shell.notice.as_ref().unwrap().text.as_ref(), "Another"));
+    }
+
+    #[gpui::test]
+    fn a_lost_reply_counts_as_done_once_the_successor_is_in_the_chat_list(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        let operation = Arc::new(Mutex::new(None::<String>));
+        let seen = operation.clone();
+        let actions = crate::work_outline::actions::WorkOutlineActions::scripted(Arc::new(move |_, params| {
+            *seen.lock().unwrap() = params["operationId"].as_str().map(str::to_owned);
+            Err(mast_rpc::RpcError::Transport("reply lost".into()))
+        }));
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| state.work_outline_actions_override = Some(actions));
+            shell.open_hand_off(CHAT_API.into(), cx);
+            shell.submit_hand_off(cx);
+        });
+        cx.run_until_parked();
+        // Nothing made yet: the dialog stays and says why.
+        shell.read_with(cx, |shell, _| {
+            let Some(WorkOutlineModal::HandOff(dialog)) = &shell.work_outline_modal else { panic!() };
+            assert!(dialog.error.is_some());
+        });
+        // The engine had made the successor after all; the retry sees it.
+        let successor = mast_proto::derive_id(operation.lock().unwrap().as_deref().unwrap(), mast_proto::roles::CHAT);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                let mut made = state.chats.iter().find(|chat| chat.id == CHAT_UI).unwrap().clone();
+                made.id = successor.clone();
+                state.chats.push(made);
+            });
+            shell.submit_hand_off(cx);
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert!(shell.work_outline_modal.is_none(), "the lost reply was a success");
+            assert!(shell.notice.is_some());
+        });
+    }
 }
