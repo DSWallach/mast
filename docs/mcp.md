@@ -179,7 +179,7 @@ The queue is off until `<engine data dir>/build-queue.json` enables it and descr
 
 `checkout` is an absolute path on the engine's machine; the queue runs its `scripts/remote-cargo.sh`. `sshAlias` must be an ssh alias (no `user@host` or address). `repo`, `checkoutPrefix` and `targetPrefix` are relative to the host's `$HOME`. `maxRunners` is at most the number of slots. `startMode` is `"admit"` (which requires the target prefix above), `"plain"` or `{"deviceSerial": "<serial>"}` (one runner).
 
-**Shared hosts and lost connections.** No engine owns a host. The slot checkout is moved only inside `remote-cargo.sh start`, under the host's slot lock and only while the slot is idle, so another engine, device or hand-run start gets `slot X busy` and cannot move a checkout under a running job. When the answer to a start is lost, the engine fences that attempt on the host (`remote-cargo.sh fence`) before it queues the job again: a fenced attempt can never run, even if its start command arrives late. While the host is unreachable the job stays `running`. These guarantees cover starts made with this version of the script.
+**Shared hosts and lost connections.** No engine owns a host. The host's slot lock and slot job record, kept by `remote-cargo.sh`, are the only fence between devices: a slot checkout moves only inside `start`, while the slot is locked and idle. When the answer to a start is lost, the engine fences that attempt on the host before it queues the job again. See [the slot lock and dropped connections](internal/desktop-build-host.md#build-queue-the-slot-lock-is-the-only-cross-device-fence) for each case and its limits.
 
 ### Role-scoped catalog and `quota_status`
 

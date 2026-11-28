@@ -44,6 +44,31 @@ ssh -o BatchMode=yes desktop 'cd ~/Work/mast && git fetch origin <branch> && git
 - Rollback to one build at a time: write `export REMOTE_CARGO_MAX_JOBS=1` to `~/Work/mast-remote-cargo.conf`, or start with `--device-serial` as before. Both stay supported. Jobs started by the old script do not hold the quiet-window lock, so a window also checks the slot files for running jobs.
 - The toolchain is cargo and rustc 1.100.0 stable, with mold through `clang` in `~/.cargo/config.toml`, sccache, and cargo-nextest. `CARGO_TARGET_DIR` is not set globally. Use the slot's value.
 
+## Build queue: the slot lock is the only cross-device fence
+
+Engines on different devices do not know about each other. No engine holds a lease on this desktop, and an engine's local state protects nothing here. The only thing that keeps two devices (or a queue and a hand-run `remote-cargo.sh start`) off the same slot checkout is enforced by `remote-cargo.sh` on the desktop, in two stages:
+
+1. **While a job starts**, the launcher holds the slot's `flock` (`/tmp/remote-cargo-slot-<slot>.lock`) from the check that the slot is idle, across the checkout (`start --checkout`), until the new job's name is in `/tmp/remote-cargo-slot-<slot>.job`.
+2. **For the rest of the job's life** the `flock` is free. The slot stays taken because that file names a job with no exit marker whose runner is still alive (PID plus start time). Every later start checks this under the `flock` and is refused with `slot <slot> busy`.
+
+Neither stage depends on the SSH connection: both live in files and processes on the desktop. The quiet-window, device and admission locks are separate and limit what may run at once; they do not protect a checkout.
+
+### When the SSH connection drops
+
+| When | On the desktop | In the engine that started the job |
+|---|---|---|
+| Before the start arrives | Nothing has happened. | It sends `fence <name>`, which claims the name so a start that arrives later is refused. The job is queued again under a new name. |
+| During the start (for example in the checkout) | The launcher may keep running or die. While it runs it holds the `flock`. If it dies first, the kernel releases the `flock` and the slot reads idle; the next `--checkout` start sets the checkout again. The launcher's `git` commands do not hold the `flock`, so if the launcher is killed outright during a checkout, that `git` command can outlive the lock. A losing checkout that collides on git's own index lock fails its job with `could not check out`. | `fence` answers `fenced` if no runner has claimed the job; that attempt can then never run, and the job is queued again. A launcher that is still running keeps its slot busy until it exits. |
+| After the runner claimed the job, answer lost | The job runs on, detached (`setsid nohup`). | `fence` answers `started` (or `exit N`) and the engine adopts the job. It is not started twice. |
+| Start lost and `fence` cannot get through | Either of the above. | The job stays `running` with no PID. Nothing is queued again until a later `fence` gets an answer. |
+| While the job runs | The job runs to its end and keeps its slot. Other devices are refused `slot busy`. | The job stays `running` and is probed again after a pause. A cancel, timeout or disk abort is retried every 60 s; attempts that cannot reach the host do not count toward the stop limit, so an unreachable job is not declared ended. |
+| While a finished job's result is collected | Files stay in `/tmp`. | If the exit status was read but the log fetch fails, the job ends with that status and its local log or summary may be empty. They are not fetched again; read `/tmp/<name>.log` on the desktop. |
+
+### What this does not cover
+
+- Only launchers running this version of the script are bound by it. A hand-run `ssh desktop cargo ...`, a manual `git checkout` in a slot checkout or an older copy of the script bypasses the fence.
+- A reboot clears `/tmp`, including job and claim files. A job whose start the engine had confirmed is then reported `lost` and is not rerun. A job whose start was never confirmed is fenced successfully afterwards and runs again, even if it had already run before the reboot.
+
 ## Mast peer pairing
 
 Done 2026-11-26: the desktop's `mast headless` listens on `127.0.0.1:27700` and this laptop is paired through an SSH tunnel (`localhost:27701`). The exact commands, gotchas, undo steps and persistent-tunnel options are in [peer-link.md](peer-link.md#recipe-pair-the-fedora-desktop-over-an-ssh-tunnel). The listener refuses a signed-in engine.
