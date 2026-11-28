@@ -4039,6 +4039,16 @@ fn chat_body(
         mast_proto::ChatIndicator::Completed => "Done",
         mast_proto::ChatIndicator::Idle => "Idle",
     };
+    // A chat waiting on the build queue says where it stands (`queued #2`, `building`); with no
+    // build jobs the lookup returns at once.
+    let status_label = match chat.status {
+        mast_proto::ChatIndicator::Idle | mast_proto::ChatIndicator::Working => state
+            .read(cx)
+            .build_jobs()
+            .badge(&chat.id)
+            .map_or(status_label, |badge| badge.label()),
+        _ => status_label,
+    };
     let word_color = match chat.status {
         mast_proto::ChatIndicator::AwaitingInput | mast_proto::ChatIndicator::Errored => {
             status_color

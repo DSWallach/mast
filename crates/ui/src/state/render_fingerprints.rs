@@ -117,6 +117,12 @@ impl AppState {
         self.selected_chat.hash(&mut h);
         self.engine.is_some().hash(&mut h);
         self.data_dir.hash(&mut h);
+        // The Overview rows' build badges. Absent (not hashed) while nothing builds, so the value
+        // is exactly what it was before build jobs existed.
+        let builds = self.build_jobs.fingerprint();
+        if builds != 0 {
+            builds.hash(&mut h);
+        }
         h.finish()
     }
 
@@ -140,8 +146,6 @@ impl AppState {
         }
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.overview_fingerprint(now).hash(&mut h);
-        // The sidebar's build badges (0 while nothing builds).
-        self.build_jobs.fingerprint().hash(&mut h);
         let _ = write!(
             Feed(&mut h),
             "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",

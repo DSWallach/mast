@@ -206,6 +206,98 @@ fn bench_overview_250_chats_40_items(cx: &mut gpui::TestAppContext) {
     });
 }
 
+/// The 250-chat Overview tree with no build jobs: drawing it consults no build badge map, and the
+/// Overview fingerprint is exactly what it is without the build queue; a queued job turns the
+/// lookups on and changes the fingerprint, and clearing it restores the original value.
+#[gpui::test]
+fn build_watch_overview_rows_cost_nothing_while_no_build_jobs_exist(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::default());
+        crate::settings::init(Default::default(), dir.path(), cx);
+    });
+    let state = cx.new(|_| AppState::new());
+    state.update(cx, |state, _| {
+        state.data_dir = Some(dir.path().to_path_buf());
+        state.chats = (0..250).map(chat_row).collect();
+        state.spaces = vec![mast_proto::Space {
+            id: SPACE.into(),
+            device_id: "local".into(),
+            path: "/work".into(),
+            name: Some("Bench".into()),
+            git_detected: true,
+            git_checked_at: None,
+            checkout_id: None,
+            created_at: Utc::now(),
+        }];
+    });
+    let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+    let composer = cx.new(|cx| crate::composer::Composer::new(state.clone(), cx));
+    let st = state.clone();
+    let (overview, vcx) = cx.add_window_view(move |_, cx| {
+        Overview::new(st, gpui::WeakEntity::new_invalid(), transcript, composer, cx)
+    });
+    vcx.run_until_parked();
+    let draw = |vcx: &mut gpui::VisualTestContext| {
+        vcx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    };
+    overview.update(vcx, |o, _| {
+        let mut map = HashMap::new();
+        map.insert(
+            SPACE.to_string(),
+            WorkOutlineLoad::Ready(std::sync::Arc::new(snapshot(40))),
+        );
+        o.outline_fixture = Some(map);
+        o.view_mode = OverviewMode::Outline;
+        o.rows_dirty = true;
+    });
+    let now = Utc::now();
+    let lookups_before = crate::build_watch::jobs::counts::lookups();
+    draw(vcx);
+    draw(vcx);
+    assert_eq!(
+        crate::build_watch::jobs::counts::lookups(),
+        lookups_before,
+        "no build jobs: drawing the 250-chat Overview must not reach the badge map"
+    );
+    let plain = state.read_with(vcx, |state, _| state.overview_fingerprint(now));
+
+    let snapshot_with = |jobs: Vec<mast_proto::BuildJobView>| mast_proto::BuildJobsSnapshot {
+        space_id: SPACE.into(),
+        jobs,
+        quiet_window_active: false,
+    };
+    // An empty snapshot is no snapshot: the fingerprint is untouched.
+    state.update(vcx, |state, _| state.set_test_build_jobs(snapshot_with(vec![])));
+    assert_eq!(state.read_with(vcx, |state, _| state.overview_fingerprint(now)), plain);
+
+    state.update(vcx, |state, cx| {
+        state.set_test_build_jobs(snapshot_with(vec![mast_proto::BuildJobView {
+            job_id: "j".into(),
+            space_id: SPACE.into(),
+            chat_id: "c0".into(),
+            state: mast_proto::BuildJobState::Queued,
+            position: Some(2),
+            ..Default::default()
+        }]));
+        cx.notify();
+    });
+    assert_ne!(state.read_with(vcx, |state, _| state.overview_fingerprint(now)), plain);
+    overview.update(vcx, |o, _| o.rows_dirty = true);
+    draw(vcx);
+    assert!(
+        crate::build_watch::jobs::counts::lookups() > lookups_before,
+        "a queued job must switch the badge lookups on"
+    );
+
+    state.update(vcx, |state, _| state.set_test_build_jobs(snapshot_with(vec![])));
+    assert_eq!(state.read_with(vcx, |state, _| state.overview_fingerprint(now)), plain);
+}
+
 #[test]
 #[ignore = "benchmark: run with --ignored --nocapture"]
 fn bench_team_300_items_50_chats() {

@@ -22,6 +22,6 @@ Each row shows:
 - **Log**, which shows the last 200 lines of the job's log under the row (select it again to hide it), and **Cancel** while the job has not finished. A cancelled queued job ends at once; a running one is asked to stop.
 - For a failed job, the first line of its error report; for a job that is not moving, the reason (for example `host unreachable; retrying`).
 
-The block's header counts running and waiting jobs and says **quiet window** while one holds the host. In the sidebar, a chat waiting on the queue shows `queued #2` or `building` in place of its time or **Working** label; chats that need input, failed or have an undelivered message keep their usual label. A chat that has finished its turn but still has a queued or running build shows in the popover as **idle · 1 background running**.
+The block's header counts running and waiting jobs and says **quiet window** while one holds the host. In the Overview tree and in the sidebar's session list, a chat waiting on the queue shows `queued #2` or `building` in place of its **Idle**, time or **Working** label; chats that need input, failed or have an undelivered message keep their usual label. A chat that has finished its turn but still has a queued or running build shows in the popover as **idle · 1 background running**.
 
 The queue is local to the device that runs the builds, so the block lists that device's jobs for the Spaces you are watching. An engine that does not have the queue yet shows no Builds block.

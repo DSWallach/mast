@@ -362,6 +362,17 @@ impl OutlineView {
                 mast_proto::ChatIndicator::Idle => "Idle",
             }
         };
+        // A chat waiting on the build queue says where it stands (`queued #2`, `building`);
+        // with no build jobs the lookup returns at once.
+        let status_label = match chat.status {
+            mast_proto::ChatIndicator::Idle | mast_proto::ChatIndicator::Working if !row.dangling => self
+                .state
+                .read(cx)
+                .build_jobs()
+                .badge(&chat.id)
+                .map_or(status_label, |badge| badge.label()),
+            _ => status_label,
+        };
         let drift = !row.dangling && self.sidebar_metadata.drift.contains(&chat.id);
         let mut details = Vec::new();
         if drift {
