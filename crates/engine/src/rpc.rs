@@ -3657,12 +3657,20 @@ impl RpcService for EngineRpc {
                         })
                         .await
                         {
-                            Ok(Ok((mut launch, source, harness, model, reasoning, model_options))) => {
+                            Ok(Ok(crate::agent_tools::OrchestratorSuccessor { mut launch, source, delegated, harness, model, reasoning, model_options })) => {
                                 launch.config = hand_off_config(&self.registry, self.repos.data_dir(), launch.config, self.doc_host.harness_for(&source), harness, model, reasoning, model_options).await?;
-                                self.launch.create_orchestrator_successor(
-                                    &launch, &self.orchestrator_wakes, &source,
-                                    crate::work_outline_launch::HandOffOrigin::Agent,
-                                )
+                                // A chat handed off for another one cannot keep running its
+                                // turn, so the predecessor is archived once the successor
+                                // starts, as a hand-off from the dialog does.
+                                let observed = (delegated)
+                                    .then(|| self.workspace.chat(&source).ok().flatten())
+                                    .flatten()
+                                    .map(|chat| crate::handoff_roles::RoleObservations::capture(&self.workspace, &self.sessions.agent_tokens(), &chat));
+                                let origin = match observed.as_ref() {
+                                    Some(observed_roles) => crate::work_outline_launch::HandOffOrigin::User { archive: Some(true), observed_roles, automatic: false },
+                                    None => crate::work_outline_launch::HandOffOrigin::Agent,
+                                };
+                                self.launch.create_orchestrator_successor(&launch, &self.orchestrator_wakes, &source, origin)
                                 .await
                                 .map_err(|e| RpcError::Failed(e.to_wire_message()))
                                 .and_then(|reply| serde_json::to_value(reply).map_err(|e| RpcError::Failed(e.to_string())))

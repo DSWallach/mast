@@ -73,12 +73,13 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "hand_off_orchestrator",
-            description: "Start a successor on this work item with your sandbox; harness and model default to yours. Hand it your active workers and pending wakes. Supply a summary and a stable idempotency key. The first message includes the workers and their open Required Actions. Your chat remains active.",
+            description: "Start a successor on this work item with your sandbox (or, with sourceChat, for one of your stalled chats with that chat's own sandbox); harness and model default to yours. Hand it your active workers and pending wakes. Supply a summary and a stable idempotency key. The first message includes the workers and their open Required Actions. Your chat remains active.",
             input_schema: json!({"type":"object", "properties": {
                 "summary": {"type":"string", "description":"Context and next steps for the successor."},
                 "harness": {"type":"string", "description":"Successor harness id (see list_harnesses)."},
                 "model": {"type":"string", "description":"Successor model id (see list_models for the chosen harness)."},
                 "reasoning": {"type":"string", "description":"Reasoning level supported by the chosen model."},
+                "sourceChat": {"type":"string", "description":"Hand off this chat instead of yourself: a chat you created, or one on an item in your subtree or project, such as a worker stopped at its usage limit. The successor takes that chat's work item, configuration and permissions (never yours), and the stalled chat is archived once the successor starts. Not for Manager or assistant chats."},
                 "contextWindow": {"type":["string","integer"], "description":"Context window for the successor, one of the choices list_models shows for the model (Codex: \"default\" or a token count; Claude: default, 250k, 500k, 750k or 1m). Omit it to keep your own window."},
                 "modelOptions": {"type":"object", "description":"Other model options for the successor, as the hand-off dialog sends them. Explicit picks win over your own options."},
                 "idempotencyKey": {"type":"string", "description":"Stable key for this hand-off; reuse on retry."}

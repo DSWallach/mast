@@ -3956,25 +3956,22 @@ impl AgentToolsService {
         })
     }
 
-    /// Authorize a successor launch using the caller's own item and configuration.
+    /// Authorize a successor launch. By default the caller hands itself off,
+    /// with its own item and configuration. With `sourceChat` a coordinator or
+    /// Manager hands off one of its own children, or a chat on an item in its
+    /// subtree or project, that cannot run a turn (a worker at its usage
+    /// limit): the successor takes the source's item, configuration and
+    /// permission ceiling, never the caller's.
     pub fn prepare_orchestrator_successor(
         &self,
         params: &AgentToolCallParams,
-    ) -> Result<(mast_proto::CreateChatForWorkItemParams, String, Option<mast_proto::HarnessId>, Option<String>, Option<mast_proto::ReasoningLevel>, serde_json::Map<String, Value>), AgentToolError> {
+    ) -> Result<OrchestratorSuccessor, AgentToolError> {
         let context = self.context(&params.token)?;
         let operation_id = context.operation_id(&params.arguments)?;
         let summary = params.arguments.get("summary").and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| AgentToolError::invalid("summary is required"))?;
-        let work_item_id = context.require_item("handing off orchestration")?;
-        let caller = self.workspace.chat(&context.grant.chat_id).ok().flatten()
-            .ok_or_else(AgentToolError::unauthenticated)?;
-        // A standing role archives its chat when it rotates; a retry of that
-        // hand-off must reach the launch, which replays or refuses it.
-        if caller.archived && !caller.is_standing_role_predecessor() {
-            return Err(AgentToolError::invalid("an archived chat cannot hand off orchestration"));
-        }
-        let source = context.grant.chat_id.clone();
+        let own_item = context.require_item("handing off orchestration")?;
         #[derive(serde::Deserialize)]
         struct Selection {
             harness: Option<mast_proto::HarnessId>,
@@ -3984,6 +3981,8 @@ impl AgentToolsService {
             model_options: serde_json::Map<String, Value>,
             #[serde(default, rename = "contextWindow")]
             context_window: Option<Value>,
+            #[serde(default, rename = "sourceChat")]
+            source_chat: Option<String>,
         }
         let selection: Selection = serde_json::from_value(params.arguments.clone())
             .map_err(|error| AgentToolError::invalid(format!("invalid hand-off selection: {error}")))?;
@@ -4000,19 +3999,93 @@ impl AgentToolsService {
             }
             Some(_) => return Err(AgentToolError::invalid("contextWindow must be a non-empty string or a positive token count")),
         }
-        Ok((mast_proto::CreateChatForWorkItemParams {
-            work_item_id,
-            initial_prompt: mast_proto::WorkItemPrompt { text: summary.to_owned(), attachments: Vec::new() },
-            config: caller.config,
-            execution_override: None,
-            worktree_choice: None,
-            operation_id,
-            parent_chat_id: None,
-            target_device_id: None,
-            account_id: None,
-            standing_role: None,
-        }, source, selection.harness, selection.model, selection.reasoning, model_options))
+        let caller_id = context.grant.chat_id.clone();
+        let (source, work_item_id) = match selection.source_chat.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(requested) => self.delegated_hand_off_source(&context, &own_item, requested, &operation_id)?,
+            None => (caller_id.clone(), own_item),
+        };
+        let source_row = self.workspace.chat(&source).ok().flatten()
+            .ok_or_else(AgentToolError::unauthenticated)?;
+        // A standing role archives its chat when it rotates; a retry of that
+        // hand-off must reach the launch, which replays or refuses it.
+        if source == caller_id && source_row.archived && !source_row.is_standing_role_predecessor() {
+            return Err(AgentToolError::invalid("an archived chat cannot hand off orchestration"));
+        }
+        Ok(OrchestratorSuccessor {
+            launch: mast_proto::CreateChatForWorkItemParams {
+                work_item_id,
+                initial_prompt: mast_proto::WorkItemPrompt { text: summary.to_owned(), attachments: Vec::new() },
+                config: source_row.config,
+                execution_override: None,
+                worktree_choice: None,
+                operation_id,
+                parent_chat_id: None,
+                target_device_id: None,
+                account_id: None,
+                standing_role: None,
+            },
+            delegated: source != caller_id,
+            source,
+            harness: selection.harness,
+            model: selection.model,
+            reasoning: selection.reasoning,
+            model_options,
+        })
     }
+
+    /// The chat `sourceChat` names and its work item, when the caller may hand
+    /// it off: a chat the caller created, or one on an item in the caller's
+    /// subtree or project. Never the caller itself, a standing-role chat (a
+    /// Manager or assistant rotates through its own role) or a chat on another
+    /// device. A retry after the source was archived by the hand-off still
+    /// resolves it.
+    fn delegated_hand_off_source(
+        &self, context: &CallContext, own_item: &str, requested: &str, operation_id: &str,
+    ) -> Result<(String, String), AgentToolError> {
+        let chats = self.workspace.read_chats().map_err(|e| AgentToolError::invalid(e.to_string()))?;
+        let source = resolve_id(requested, chats.iter().map(|chat| chat.id.as_str()), "chat")?;
+        let caller = &context.grant.chat_id;
+        if source == *caller {
+            return Err(AgentToolError::invalid("sourceChat is your own chat; omit it to hand yourself off"));
+        }
+        let row = chats.iter().find(|chat| chat.id == source).ok_or_else(AgentToolError::unauthenticated)?;
+        let item = self.workspace.chat_assigned_work_item(&source, &context.grant.space_id);
+        let created = row.parent_chat_id.as_deref() == Some(caller.as_str());
+        let snapshot = self.work_outline.snapshot(&context.grant.space_id);
+        let scoped = item.as_deref().is_some_and(|item| in_agent_scope(&snapshot, own_item, item));
+        if row.space_id.as_deref() != Some(context.grant.space_id.as_str()) || !(created || scoped) {
+            return Err(WorkOutlineError::unauthorized(
+                "sourceChat must be a chat you created or one on an item in your own item's subtree or project",
+            ).into());
+        }
+        if row.device_id != self.workspace.device_id() {
+            return Err(AgentToolError::invalid("sourceChat runs on another device; hand it off from that device"));
+        }
+        if self.workspace.chat_in_standing_role(&source) {
+            return Err(AgentToolError::invalid("a Manager or assistant chat hands off through its own role, not through sourceChat"));
+        }
+        if row.archived {
+            let successor = mast_proto::work_outline::derive_id(operation_id, mast_proto::work_outline::roles::CHAT);
+            if !self.workspace.hand_off_recorded(&source, &successor) {
+                return Err(AgentToolError::invalid("sourceChat is archived; nothing to hand off"));
+            }
+        }
+        let item = item.ok_or_else(|| AgentToolError::invalid("sourceChat has no work item"))?;
+        Ok((source, item))
+    }
+}
+
+/// An authorized `hand_off_orchestrator` launch.
+pub struct OrchestratorSuccessor {
+    pub launch: mast_proto::CreateChatForWorkItemParams,
+    /// The chat handed off: the caller, or with `sourceChat` one of its chats.
+    pub source: String,
+    /// Whether the caller handed off a chat other than itself.
+    pub delegated: bool,
+    pub harness: Option<mast_proto::HarnessId>,
+    pub model: Option<String>,
+    pub reasoning: Option<mast_proto::ReasoningLevel>,
+    pub model_options: serde_json::Map<String, Value>,
 }
 
 /// One `work_outline_read_subtree` walk.

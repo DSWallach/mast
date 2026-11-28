@@ -2129,6 +2129,40 @@ async fn hand_off_orchestrator_tool_carries_the_requested_context_window() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_coordinator_hands_off_a_stalled_child_through_source_chat() {
+    let rig = rig().await;
+    let root = create_item(&rig, "stalled-root", "Coordinator", None).await;
+    let step = create_item(&rig, "stalled-step", "Step", Some(&root)).await;
+    let elsewhere = create_item(&rig, "stalled-else", "Elsewhere", None).await;
+    assign_chat(&rig, "stalled-root-assignment", CHAT, &root).await;
+    for (id, parent) in [("stalled-worker", Some(CHAT)), ("stalled-stranger", None)] {
+        let mut op = json!({"op":"createChat", "chatId":id, "spaceId":SPACE, "deviceId":rig.core.device_id});
+        if let Some(parent) = parent { op["parentChatId"] = json!(parent); }
+        rig.client.call(methods::MUTATE, op).await.unwrap();
+    }
+    assign_chat(&rig, "stalled-worker-assignment", "stalled-worker", &step).await;
+    assign_chat(&rig, "stalled-stranger-assignment", "stalled-stranger", &elsewhere).await;
+    let lease = rig.core.sessions.agent_tokens().mint(CHAT, "run-stalled", SPACE, &rig.core.device_id);
+    let hand_off = |key: &str, source: &str| tool(&rig, lease.token(), "hand_off_orchestrator", json!({
+        "summary": "Pick the work up", "idempotencyKey": key, "sourceChat": source,
+    }));
+    // Not the caller itself, and not a chat outside its subtree or project.
+    assert!(hand_off("stalled-self", CHAT).await.is_err());
+    assert!(hand_off("stalled-stranger-key", "stalled-stranger").await.is_err());
+    let reply = hand_off("stalled-one", "stalled-worker").await.unwrap();
+    let successor = reply["chatId"].as_str().unwrap().to_owned();
+    let workspace = &rig.core.workspace;
+    // The successor takes the stalled worker's item and keeps reporting to the coordinator.
+    assert_eq!(workspace.chat_assigned_work_item(&successor, SPACE).as_deref(), Some(step.as_str()));
+    assert_eq!(workspace.chat(&successor).unwrap().unwrap().parent_chat_id.as_deref(), Some(CHAT));
+    assert!(workspace.chat("stalled-worker").unwrap().unwrap().archived);
+    assert!(!workspace.chat(CHAT).unwrap().unwrap().archived);
+    // A retry after the archive returns the same successor.
+    let retry = hand_off("stalled-one", "stalled-worker").await.unwrap();
+    assert_eq!(retry["chatId"], successor);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_child_started_for_a_descendant_item_gets_that_items_instructions() {
     let rig = rig().await;
     let root_a = create_item(&rig, "op-a", "Coordinator", None).await;
