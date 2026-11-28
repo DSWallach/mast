@@ -1,17 +1,28 @@
 //! Credit fallback: a worker that runs out of credits or hits a usage limit
 //! keeps going instead of sitting errored.
 //!
-//! A per-model Claude limit steps the chat down one model in place (Opus to
-//! Sonnet to Haiku, never up) and re-runs the failed turn. Any account-wide
-//! limit, or the bottom of the ladder, starts a successor worker on the same
-//! work item on another enabled harness and keeps the stalled chat. With no
-//! harness left it reports instead. Cursor's transient `rate_limit` is never
-//! acted on.
+//! A worker's usage limit is answered in this order:
+//!
+//! 1. another signed-in managed account of the same harness that has quota
+//!    left: a successor worker pinned to it;
+//! 2. for a per-model Claude limit only, one model down in place (Opus to
+//!    Sonnet to Haiku, never up) and the failed turn again, unless the account
+//!    is known to have nothing left for that model;
+//! 3. a successor on another enabled harness, the one with the most quota
+//!    left. With no harness left it reports instead.
+//!
+//! Quota comes from [`Headroom`]. Until something supplies it everything is
+//! unknown, so step 1 never applies and step 3 takes Claude first, then the
+//! other harnesses in order. A successor is a new chat on the same work item;
+//! the stalled chat is kept, and its worktree is saved as a task checkpoint
+//! (see [`crate::task_checkpoint`]) before the successor starts. Cursor's
+//! transient `rate_limit` is never acted on.
 //!
 //! The record is a set of keys in the durable processed-command ledger, keyed
 //! by (chat, error entry id): `decided` holds the decision itself, so a retry,
-//! a manual Retry or a restart re-reads it instead of deciding again, and
-//! `switched`, `created`, `requeued`, `reported` and `done` mark the steps. A
+//! a manual Retry or a restart re-reads it instead of deciding again,
+//! `checkpoint` holds the saved commit so the successor's prompt never changes
+//! between attempts, and `switched`, `created`, `requeued`, `reported` and `done` mark the steps. A
 //! chat that was already errored when the host started is only resumed if it
 //! has a decision; it never gets a new one.
 //!
@@ -39,6 +50,8 @@
 //! model, which is safe but conservative.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use mast_proto::work_outline::{WorkOutlineErrorCode, derive_id, roles};
 use mast_proto::{
@@ -50,8 +63,10 @@ use tokio_util::sync::CancellationToken;
 use crate::artifacts::ArtifactsService;
 use crate::automatic_manager_handoff::{manager_status, no_status_text};
 use crate::handoff_roles::{AutomaticHandoff, RoleObservations};
+use crate::managed_accounts::supports_managed_accounts;
 use crate::orchestrator_wakes::OrchestratorWakes;
 use crate::sessions::SessionsEngine;
+use crate::task_checkpoint::{self, CheckpointRequest};
 use crate::work_outline::LEDGER_KEY_PREFIX;
 use crate::work_outline_launch::WorkItemLaunchService;
 use crate::{DocHost, WorkspaceHost};
@@ -66,6 +81,9 @@ enum Decision {
     Step { to: String },
     /// Start a successor worker on `harness`.
     Successor(HarnessId),
+    /// Start a successor worker on `harness` pinned to a chosen account; an
+    /// empty `account` is the Default login.
+    Switch { harness: HarnessId, account: String },
     /// Nothing to switch to: report only.
     Report,
     /// A Manager's hand-off to entry `index` of its fallback chain. The
@@ -80,6 +98,7 @@ impl Decision {
         match self {
             Self::Step { to } => format!("step:{to}"),
             Self::Successor(harness) => format!("successor:{}", harness_name(*harness)),
+            Self::Switch { harness, account } => format!("switch:{}:{account}", harness_name(*harness)),
             Self::Report => "report".into(),
             Self::Chain { index, harness, model } => {
                 format!("chain:{index}:{}:{}", harness_name(*harness), model.as_deref().unwrap_or_default())
@@ -104,6 +123,10 @@ impl Decision {
                 model: Some(model.to_owned()).filter(|model| !model.is_empty()),
             });
         }
+        if let Some(rest) = text.strip_prefix("switch:") {
+            let (harness, account) = rest.split_once(':')?;
+            return Some(Self::Switch { harness: parse_harness(harness)?, account: account.into() });
+        }
         if let Some(to) = text.strip_prefix("step:") {
             return Some(Self::Step { to: to.into() });
         }
@@ -113,6 +136,130 @@ impl Decision {
 
 fn parse_harness(text: &str) -> Option<HarnessId> {
     serde_json::from_value(serde_json::Value::String(text.into())).ok()
+}
+
+/// One login of one harness: a managed account, or the Default login.
+#[cfg_attr(not(test), allow(dead_code))] // Read by a quota source once wired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AccountRef<'a> {
+    pub(crate) harness: HarnessId,
+    /// `None` is the Default login.
+    pub(crate) account_id: Option<&'a str>,
+}
+
+/// What fallback knows about remaining quota. The defaults know nothing, which
+/// keeps the order that needs no quota data.
+pub(crate) trait Headroom: Send + Sync {
+    /// The share of quota `account` has left for `model`, up to the user's cap:
+    /// positive means usable, zero or less means exhausted, `None` unknown.
+    fn headroom(&self, _account: AccountRef<'_>, _model: Option<&str>) -> Option<f64> { None }
+
+    /// Ids of the signed-in managed accounts of `harness`.
+    fn accounts(&self, _harness: HarnessId) -> Vec<String> { Vec::new() }
+}
+
+/// No quota source is wired.
+pub(crate) struct UnknownHeadroom;
+
+impl Headroom for UnknownHeadroom {}
+
+/// A quota answer, with a number that means nothing read as unknown.
+fn known(headroom: &dyn Headroom, harness: HarnessId, account: &str, model: Option<&str>) -> Option<f64> {
+    let account = AccountRef { harness, account_id: Some(account).filter(|id| !id.is_empty()) };
+    headroom.headroom(account, model).filter(|share| share.is_finite())
+}
+
+/// The account with the most quota left among `ids`; the first wins a tie.
+fn best_account<'a>(
+    headroom: &dyn Headroom, harness: HarnessId, ids: impl Iterator<Item = &'a str>, model: Option<&str>,
+) -> Option<(f64, &'a str)> {
+    ids.filter_map(|id| Some((known(headroom, harness, id, model)?, id)))
+        .filter(|(share, _)| *share > 0.0)
+        .reduce(|best, next| if next.0 > best.0 { next } else { best })
+}
+
+/// What a worker's limit is decided from.
+struct WorkerLimit<'a> {
+    code: &'a str,
+    harness: HarnessId,
+    /// The model the failed turn ran on; `None` is the harness default.
+    model: Option<&'a str>,
+    /// The account the chat is pinned to; empty is the Default login.
+    account: &'a str,
+    /// Accounts of this harness the lineage already ran on.
+    used_accounts: &'a HashSet<String>,
+    used_harnesses: &'a HashSet<HarnessId>,
+    enabled: &'a [HarnessId],
+}
+
+/// The answer to a worker's limit, in the order the module docs give. `None`
+/// for an error that is not a usage limit.
+fn plan(limit: &WorkerLimit<'_>, headroom: &dyn Headroom) -> Option<Decision> {
+    if !matches!(limit.code, "usage_5h" | "usage_weekly" | "usage_limit" | "usage_weekly_model") {
+        return None;
+    }
+    let harness = limit.harness;
+    let model = limit.model.or_else(|| harness.default_model());
+    if supports_managed_accounts(harness) && limit.enabled.contains(&harness) {
+        let ids = headroom.accounts(harness);
+        let others = ids.iter().map(String::as_str)
+            .filter(|id| !id.is_empty() && *id != limit.account && !limit.used_accounts.contains(*id));
+        if let Some((_, account)) = best_account(headroom, harness, others, model) {
+            return Some(Decision::Switch { harness, account: account.into() });
+        }
+    }
+    // Only a per-model limit is cleared by another model of the same account.
+    if limit.code == "usage_weekly_model" && harness == HarnessId::ClaudeCode
+        && let Some(to) = model.and_then(cheaper_claude_model)
+        && known(headroom, harness, limit.account, Some(to)).is_none_or(|share| share > 0.0)
+    {
+        return Some(Decision::Step { to: to.into() });
+    }
+    let claude_first = limit.enabled.iter().copied().filter(|h| *h == HarnessId::ClaudeCode);
+    let others = limit.enabled.iter().copied().filter(|h| *h != HarnessId::ClaudeCode);
+    let mut roomiest: Option<(f64, Decision)> = None;
+    let mut unknown = None;
+    for next in claude_first.chain(others)
+        .filter(|h| *h != HarnessId::Mock && *h != harness && !limit.used_harnesses.contains(h))
+    {
+        let ids = if supports_managed_accounts(next) { headroom.accounts(next) } else { Vec::new() };
+        let logins = std::iter::once("").chain(ids.iter().map(String::as_str).filter(|id| !id.is_empty()));
+        match best_account(headroom, next, logins, next.default_model()) {
+            Some((share, account)) => {
+                if roomiest.as_ref().is_none_or(|(best, _)| share > *best) {
+                    roomiest = Some((share, Decision::Switch { harness: next, account: account.into() }));
+                }
+            }
+            // A harness whose Default login is known to be exhausted is skipped.
+            None if known(headroom, next, "", next.default_model()).is_none() => {
+                unknown.get_or_insert(Decision::Successor(next));
+            }
+            None => {}
+        }
+    }
+    Some(roomiest.map(|(_, decision)| decision).or(unknown).unwrap_or(Decision::Report))
+}
+
+/// What to do with an account whose usage is being watched.
+#[cfg_attr(not(test), allow(dead_code))] // Called once a quota source is wired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DrainDecision {
+    Continue,
+    /// Let the running turn finish, then checkpoint and continue elsewhere.
+    FinishTurnThenSwap,
+}
+
+/// The proactive turn-boundary drain: `used` and `hard_cap` are fractions of
+/// the account's quota, `used` including any reserve for turns in flight.
+/// Reaching the cap drains; a missing or meaningless number never does.
+#[cfg_attr(not(test), allow(dead_code))] // Called once a quota source is wired.
+pub(crate) fn proactive_drain(used: Option<f64>, hard_cap: Option<f64>) -> DrainDecision {
+    match (used, hard_cap) {
+        (Some(used), Some(cap)) if used.is_finite() && cap.is_finite() && cap > 0.0 && used >= cap => {
+            DrainDecision::FinishTurnThenSwap
+        }
+        _ => DrainDecision::Continue,
+    }
 }
 
 /// Whether a chain entry's model names the model a chat runs on; no model
@@ -216,13 +363,22 @@ pub(crate) struct CreditFallback {
     wakes: OrchestratorWakes,
     host: DocHost,
     artifacts: ArtifactsService,
+    headroom: Arc<dyn Headroom>,
 }
 
 pub(crate) fn start(
     workspace: WorkspaceHost, sessions: SessionsEngine, launch: WorkItemLaunchService,
     wakes: OrchestratorWakes, host: DocHost, artifacts: ArtifactsService,
 ) -> CancellationToken {
-    let service = CreditFallback { workspace, sessions, launch, wakes, host, artifacts };
+    start_with_headroom(workspace, sessions, launch, wakes, host, artifacts, Arc::new(UnknownHeadroom))
+}
+
+/// [`start`] with a quota source.
+pub(crate) fn start_with_headroom(
+    workspace: WorkspaceHost, sessions: SessionsEngine, launch: WorkItemLaunchService,
+    wakes: OrchestratorWakes, host: DocHost, artifacts: ArtifactsService, headroom: Arc<dyn Headroom>,
+) -> CancellationToken {
+    let service = CreditFallback { workspace, sessions, launch, wakes, host, artifacts, headroom };
     let cancel = CancellationToken::new();
     let stopped = cancel.clone();
     let mut rx = service.sessions.watch_sessions();
@@ -325,8 +481,8 @@ impl CreditFallback {
         Decision::decode(key.strip_prefix(&prefix)?)
     }
 
-    /// Harnesses already part of this chat's fallback lineage, itself included.
-    fn lineage_harnesses(&self, chat: &str) -> HashSet<HarnessId> {
+    /// The chats of this chat's fallback lineage, itself included.
+    fn lineage(&self, chat: &str) -> HashSet<String> {
         let mut seen = HashSet::new();
         let mut next = Some(chat.to_owned());
         while let Some(id) = next.take() {
@@ -334,7 +490,7 @@ impl CreditFallback {
             next = self.workspace.ledger_find_prefix(&lineage_prefix(&id)).ok().flatten()
                 .and_then(|key| key.strip_prefix(&lineage_prefix(&id)).map(str::to_owned));
         }
-        seen.iter().filter_map(|id| self.workspace.chat_config(id)).map(|config| config.harness).collect()
+        seen
     }
 
     /// Where `chat` sits in `chain`: the index recorded for it when it was
@@ -396,27 +552,27 @@ impl CreditFallback {
             if !matches!(code, "usage_5h" | "usage_weekly" | "usage_limit" | "usage_weekly_model") { return None; }
             return self.decide_manager(chat, code, &config, role);
         }
-        let per_model = code == "usage_weekly_model" && config.harness == HarnessId::ClaudeCode;
-        if !per_model && !matches!(code, "usage_5h" | "usage_weekly" | "usage_limit" | "usage_weekly_model") {
-            return None;
-        }
-        if per_model {
-            // The model the failed turn ran on, not the chat's current one: a
-            // turn that raced a switch must not step down twice.
-            let ran = self.sessions.last_request(chat).and_then(|request| request.model)
-                .or_else(|| config.model.clone()).filter(|model| !model.trim().is_empty());
-            let current = ran.unwrap_or_else(|| HarnessId::ClaudeCode.default_model().unwrap_or_default().into());
-            if let Some(to) = cheaper_claude_model(&current) {
-                return Some(Decision::Step { to: to.into() });
+        // The model the failed turn ran on, not the chat's current one: a turn
+        // that raced a switch must not step down twice.
+        let ran = self.sessions.last_request(chat).and_then(|request| request.model)
+            .or_else(|| config.model.clone()).filter(|model| !model.trim().is_empty());
+        let account = self.sessions.chat_account_pin(chat, config.harness).unwrap_or_default();
+        let (mut used_harnesses, mut used_accounts) = (HashSet::new(), HashSet::new());
+        for id in self.lineage(chat) {
+            let Some(harness) = self.workspace.chat_config(&id).map(|c| c.harness) else { continue };
+            used_harnesses.insert(harness);
+            if harness == config.harness {
+                used_accounts.extend(self.sessions.chat_account_pin(&id, harness));
             }
         }
-        let used = self.lineage_harnesses(chat);
         let enabled = self.sessions.enabled_harnesses();
-        let claude_first = enabled.iter().copied().filter(|h| *h == HarnessId::ClaudeCode);
-        let others = enabled.iter().copied().filter(|h| *h != HarnessId::ClaudeCode);
-        let harness = claude_first.chain(others)
-            .find(|h| *h != HarnessId::Mock && *h != config.harness && !used.contains(h));
-        Some(harness.map_or(Decision::Report, Decision::Successor))
+        plan(
+            &WorkerLimit {
+                code, harness: config.harness, model: ran.as_deref(), account: &account,
+                used_accounts: &used_accounts, used_harnesses: &used_harnesses, enabled: &enabled,
+            },
+            self.headroom.as_ref(),
+        )
     }
 
     /// Out of attempts: say so once, so the Manager is not left guessing. The
@@ -498,10 +654,16 @@ impl CreditFallback {
                 Ok(line) => line,
                 Err(outcome) => return outcome,
             },
-            Decision::Successor(harness) => match self.apply_successor(chat_id, &entry, &base, *harness, &code).await {
+            Decision::Successor(harness) => match self.apply_successor(chat_id, &entry, &base, *harness, None, &code).await {
                 Ok(line) => line,
                 Err(outcome) => return outcome,
             },
+            Decision::Switch { harness, account } => {
+                match self.apply_successor(chat_id, &entry, &base, *harness, Some(account), &code).await {
+                    Ok(line) => line,
+                    Err(outcome) => return outcome,
+                }
+            }
             Decision::Report => Some(format!(
                 "Credit fallback: chat {chat_id} ({}) hit {} and no other enabled harness is left; it needs credits or a manual switch.",
                 harness_name(self.workspace.chat_config(chat_id).map(|c| c.harness).unwrap_or(HarnessId::Mock)), limit_label(&code))),
@@ -588,16 +750,31 @@ impl CreditFallback {
         Ok(Some(line))
     }
 
-    async fn apply_successor(&self, chat_id: &str, entry: &str, base: &str, harness: HarnessId, code: &str) -> Result<Option<String>, Outcome> {
+    async fn apply_successor(
+        &self, chat_id: &str, entry: &str, base: &str, harness: HarnessId, account: Option<&str>, code: &str,
+    ) -> Result<Option<String>, Outcome> {
         let operation = successor_operation(chat_id, entry);
         let successor = derive_id(&operation, roles::CHAT);
         let created = format!("{base}:created");
+        let same_harness = self.workspace.chat_config(chat_id).is_some_and(|config| config.harness == harness);
         if !self.holds(&created) {
             // Recorded before the launch so the new chat's own fallback never
             // returns to a harness this lineage already used.
             self.mark(&format!("{}{chat_id}", lineage_prefix(&successor)));
             if self.hooked("credit_fallback_successor", chat_id) { return Err(Outcome::Retry); }
-            let prompt = successor_prompt(chat_id);
+            // Pinned before the launch: a chat keeps its first pin, ahead of
+            // its project's default account.
+            if let Some(account) = account.filter(|_| supports_managed_accounts(harness))
+                && let Err(error) = self.sessions.pin_chat_account(&successor, harness, account)
+            {
+                tracing::warn!(chat = %chat_id, %error, "credit fallback account could not be pinned yet");
+                return Err(Outcome::Retry);
+            }
+            let saved = self.checkpoint_once(chat_id, base, code).await?;
+            let mut prompt = successor_prompt(chat_id);
+            if let Some(commit) = saved {
+                prompt.push_str(&checkpoint_note(&commit));
+            }
             match self.launch.create_credit_successor(chat_id, &operation, harness, prompt).await {
                 Ok(_) => {}
                 // The same operation with different inputs (the stalled chat's
@@ -613,9 +790,64 @@ impl CreditFallback {
             self.mark(&format!("{}{successor}", successor_prefix(chat_id)));
             self.mark(&created);
         }
+        let login = if same_harness { " with another account" } else { "" };
         Ok(Some(format!(
-            "Credit fallback: chat {chat_id} hit {}; continued as chat {successor} on {}. The stalled chat is kept.",
+            "Credit fallback: chat {chat_id} hit {}; continued as chat {successor} on {}{login}. The stalled chat is kept.",
             limit_label(code), harness_name(harness))))
+    }
+
+    /// Save the stalled chat's worktree, once per record: the commit, or `None`
+    /// when there is nothing to save or saving failed. A failure never holds the
+    /// successor back, which starts in the same folder.
+    async fn checkpoint_once(&self, chat_id: &str, base: &str, code: &str) -> Result<Option<String>, Outcome> {
+        let prefix = format!("{base}:checkpoint:");
+        if let Ok(Some(key)) = self.workspace.ledger_find_prefix(&prefix) {
+            return Ok(key.strip_prefix(&prefix).filter(|sha| *sha != "none").map(str::to_owned));
+        }
+        let commit = match self.checkpoint_target(chat_id, code) {
+            Some((worktree, request)) => {
+                match tokio::task::spawn_blocking(move || save_outside_home(&worktree, &request)).await {
+                    Ok(Ok(commit)) => commit,
+                    Ok(Err(error)) => {
+                        tracing::warn!(chat = %chat_id, %error, "credit fallback checkpoint was not saved");
+                        None
+                    }
+                    Err(error) => {
+                        tracing::warn!(chat = %chat_id, %error, "credit fallback checkpoint task failed");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        if !self.mark(&format!("{prefix}{}", commit.as_deref().unwrap_or("none"))) { return Err(Outcome::Retry); }
+        Ok(commit)
+    }
+
+    /// Where the stalled chat works (its bound worktree, else its execution
+    /// root) and what to record about it.
+    fn checkpoint_target(&self, chat_id: &str, code: &str) -> Option<(PathBuf, CheckpointRequest)> {
+        let item_id = self.workspace
+            .registry_row(mast_doc::KIND_WORK_ITEM_CHAT_ASSIGNMENTS, chat_id)
+            .filter(|row| !row.deleted)
+            .and_then(|row| row.fields.get("workItemId").and_then(|v| v.as_str()).map(str::to_owned))?;
+        let bound = self.workspace.chat_diff_targets(chat_id).ok().flatten().and_then(|row| row.selected);
+        let worktree = bound
+            .or_else(|| self.workspace.checked_chat_execution_binding(chat_id).ok().flatten()
+                .map(|binding| binding.resolved.configuration.execution_root))
+            .or_else(|| self.workspace.chat(chat_id).ok().flatten().and_then(|chat| chat.cwd))?;
+        let config = self.workspace.chat_config(chat_id)?;
+        let model = self.sessions.last_request(chat_id).and_then(|request| request.model).or(config.model);
+        let request = CheckpointRequest {
+            item_id,
+            chat_id: chat_id.to_owned(),
+            account_id: self.sessions.chat_account_pin(chat_id, config.harness),
+            harness: harness_name(config.harness),
+            model,
+            reason: code.to_owned(),
+            note: format!("Chat {chat_id} stopped on {}.", limit_label(code)),
+        };
+        Some((PathBuf::from(worktree), request))
     }
 
     /// Save the Manager's hand-off to chain entry `index` as an automatic
@@ -734,6 +966,28 @@ fn limit_label(code: &str) -> &'static str {
     }
 }
 
+/// Checkpoint `worktree` and return the commit. A repository rooted at the home
+/// folder is left alone: saving it would read everything the user owns.
+fn save_outside_home(worktree: &Path, request: &CheckpointRequest) -> Result<Option<String>, crate::EngineError> {
+    let home = std::env::var_os("HOME").and_then(|home| std::fs::canonicalize(home).ok());
+    let root = std::fs::canonicalize(worktree)?.ancestors()
+        .find(|dir| dir.join(".git").exists()).map(Path::to_path_buf);
+    match root {
+        Some(root) if home.as_ref() != Some(&root) => {
+            task_checkpoint::save(&root, request).map(|saved| Some(saved.checkpoint.commit))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn checkpoint_note(commit: &str) -> String {
+    format!(
+        " Its worktree was saved when it stopped, uncommitted and untracked files included, as commit {commit} under refs/mast/wip. \
+Keep using the worktree as it is. Only if it is gone or damaged, restore the commit into a new worktree \
+(git worktree add -b <branch> <folder> {commit}, then git reset --soft {commit}^ inside it)."
+    )
+}
+
 fn successor_prompt(stalled: &str) -> String {
     format!(
         "Chat {stalled} was working on this work item and stopped because its harness ran out of credits or hit a usage limit. \
@@ -795,5 +1049,144 @@ mod tests {
         assert_eq!(op, successor_operation("chat", "entry"));
         assert_ne!(op, successor_operation("chat", "other"));
         assert!(op.len() <= 64 && op.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    /// Scripted quota: accounts per harness, and a share per (harness, account,
+    /// model); an empty account is the Default login and `*` matches any model.
+    #[derive(Default)]
+    struct Quota {
+        accounts: Vec<(HarnessId, &'static str)>,
+        shares: Vec<(HarnessId, &'static str, &'static str, f64)>,
+    }
+
+    impl Headroom for Quota {
+        fn headroom(&self, account: AccountRef<'_>, model: Option<&str>) -> Option<f64> {
+            self.shares.iter().find(|(harness, id, wanted, _)| {
+                *harness == account.harness && *id == account.account_id.unwrap_or_default()
+                    && (*wanted == "*" || Some(*wanted) == model)
+            }).map(|(.., share)| *share)
+        }
+
+        fn accounts(&self, harness: HarnessId) -> Vec<String> {
+            self.accounts.iter().filter(|(h, _)| *h == harness).map(|(_, id)| (*id).to_owned()).collect()
+        }
+    }
+
+    const OPUS: &str = "claude-opus-5-5";
+    const CLAUDE: HarnessId = HarnessId::ClaudeCode;
+    const CODEX: HarnessId = HarnessId::Codex;
+    const CURSOR: HarnessId = HarnessId::Cursor;
+
+    fn planned(quota: &dyn Headroom, code: &str, harness: HarnessId, model: &str, used_accounts: &[&str]) -> Option<Decision> {
+        let used_accounts = used_accounts.iter().map(|id| (*id).to_owned()).collect();
+        plan(
+            &WorkerLimit {
+                code, harness, model: Some(model), account: "current", used_accounts: &used_accounts,
+                used_harnesses: &HashSet::from([harness]), enabled: &[HarnessId::Mock, CURSOR, CODEX, CLAUDE],
+            },
+            quota,
+        )
+    }
+
+    fn switch(harness: HarnessId, account: &str) -> Option<Decision> {
+        Some(Decision::Switch { harness, account: account.into() })
+    }
+
+    fn step_to_sonnet() -> Option<Decision> {
+        Some(Decision::Step { to: cheaper_claude_model(OPUS).unwrap().into() })
+    }
+
+    #[test]
+    fn a_switch_decision_round_trips_through_its_ledger_key() {
+        for account in ["", "acc-1", "a:b"] {
+            let decision = Decision::Switch { harness: CODEX, account: account.into() };
+            assert_eq!(Decision::decode(&decision.encode()), Some(decision));
+        }
+        assert_eq!(Decision::decode("switch:nonsense:a"), None);
+        assert_eq!(Decision::decode("switch:codex"), None);
+    }
+
+    #[test]
+    fn another_account_comes_before_a_step_down_which_comes_before_another_harness() {
+        let mut quota = Quota {
+            accounts: vec![(CLAUDE, "current"), (CLAUDE, "low"), (CLAUDE, "high")],
+            shares: vec![(CLAUDE, "current", "*", 0.5), (CLAUDE, "low", "*", 0.1), (CLAUDE, "high", "*", 0.4),
+                (CODEX, "", "*", 0.9)],
+        };
+        assert_eq!(planned(&quota, "usage_weekly_model", CLAUDE, OPUS, &[]), switch(CLAUDE, "high"));
+        assert_eq!(planned(&quota, "usage_weekly", CLAUDE, OPUS, &[]), switch(CLAUDE, "high"));
+        // The lineage never returns to an account it ran on.
+        assert_eq!(planned(&quota, "usage_5h", CLAUDE, OPUS, &["high"]), switch(CLAUDE, "low"));
+        assert_eq!(planned(&quota, "usage_weekly_model", CLAUDE, OPUS, &["high", "low"]), step_to_sonnet());
+        // An account-wide limit never steps down.
+        assert_eq!(planned(&quota, "usage_weekly", CLAUDE, OPUS, &["high", "low"]), switch(CODEX, ""));
+        // An alternate account with nothing left is not one.
+        quota.shares = vec![(CLAUDE, "low", "*", 0.0), (CLAUDE, "high", "*", -0.2)];
+        assert_eq!(planned(&quota, "usage_weekly_model", CLAUDE, OPUS, &[]), step_to_sonnet());
+    }
+
+    #[test]
+    fn an_account_is_judged_for_the_model_that_hit_the_limit() {
+        let quota = Quota {
+            accounts: vec![(CLAUDE, "other")],
+            shares: vec![(CLAUDE, "other", OPUS, 0.0), (CLAUDE, "other", "*", 0.8)],
+        };
+        assert_eq!(planned(&quota, "usage_weekly_model", CLAUDE, OPUS, &[]), step_to_sonnet());
+    }
+
+    #[test]
+    fn a_step_down_is_skipped_when_the_account_has_nothing_left_or_there_is_no_cheaper_model() {
+        let sonnet = cheaper_claude_model(OPUS).unwrap();
+        let quota = Quota { accounts: Vec::new(), shares: vec![(CLAUDE, "current", sonnet, 0.0)] };
+        assert_eq!(planned(&quota, "usage_weekly_model", CLAUDE, OPUS, &[]), Some(Decision::Successor(CURSOR)));
+        let haiku = cheaper_claude_model(sonnet).unwrap();
+        assert_eq!(planned(&UnknownHeadroom, "usage_weekly_model", CLAUDE, haiku, &[]), Some(Decision::Successor(CURSOR)));
+        // Only Claude has per-model limits.
+        assert_eq!(planned(&UnknownHeadroom, "usage_weekly_model", CODEX, "gpt-5", &[]), Some(Decision::Successor(CLAUDE)));
+    }
+
+    #[test]
+    fn another_harness_is_the_one_with_the_most_quota_left() {
+        let mut quota = Quota {
+            accounts: vec![(CLAUDE, "work")],
+            shares: vec![(CLAUDE, "", "*", 0.2), (CLAUDE, "work", "*", 0.3), (CURSOR, "", "*", 0.7)],
+        };
+        assert_eq!(planned(&quota, "usage_limit", CODEX, "gpt-5", &[]), switch(CURSOR, ""));
+        quota.shares[2].3 = 0.25;
+        assert_eq!(planned(&quota, "usage_limit", CODEX, "gpt-5", &[]), switch(CLAUDE, "work"));
+        // Known quota beats unknown.
+        quota.shares = vec![(CURSOR, "", "*", 0.1)];
+        assert_eq!(planned(&quota, "usage_limit", CODEX, "gpt-5", &[]), switch(CURSOR, ""));
+        // An exhausted harness is skipped.
+        quota.shares = vec![(CLAUDE, "", "*", 0.0)];
+        assert_eq!(planned(&quota, "usage_limit", CODEX, "gpt-5", &[]), Some(Decision::Successor(CURSOR)));
+        quota.shares = vec![(CLAUDE, "", "*", 0.0), (CLAUDE, "work", "*", 0.0), (CURSOR, "", "*", 0.0)];
+        assert_eq!(planned(&quota, "usage_limit", CODEX, "gpt-5", &[]), Some(Decision::Report));
+    }
+
+    #[test]
+    fn unknown_quota_keeps_the_order_that_needs_none() {
+        // Accounts with no quota data are never switched to.
+        let listed = Quota { accounts: vec![(CLAUDE, "other"), (CODEX, "second")], shares: Vec::new() };
+        let broken = Quota { accounts: listed.accounts.clone(), shares: vec![(CLAUDE, "other", "*", f64::NAN)] };
+        for quota in [&UnknownHeadroom as &dyn Headroom, &listed, &broken] {
+            assert_eq!(planned(quota, "usage_weekly_model", CLAUDE, OPUS, &[]), step_to_sonnet());
+            assert_eq!(planned(quota, "usage_weekly", CLAUDE, OPUS, &[]), Some(Decision::Successor(CURSOR)));
+            assert_eq!(planned(quota, "usage_limit", CODEX, "gpt-5", &[]), Some(Decision::Successor(CLAUDE)));
+            assert_eq!(planned(quota, "rate_limit", CURSOR, "auto", &[]), None);
+        }
+    }
+
+    #[test]
+    fn the_drain_starts_at_the_cap_and_never_on_missing_numbers() {
+        use DrainDecision::{Continue, FinishTurnThenSwap};
+        assert_eq!(proactive_drain(Some(0.79), Some(0.8)), Continue);
+        assert_eq!(proactive_drain(Some(0.8), Some(0.8)), FinishTurnThenSwap);
+        assert_eq!(proactive_drain(Some(1.2), Some(0.8)), FinishTurnThenSwap);
+        for (used, cap) in [(None, Some(0.8)), (Some(0.9), None), (Some(f64::NAN), Some(0.8)),
+            (Some(f64::INFINITY), Some(0.8)), (Some(0.0), Some(0.0))]
+        {
+            assert_eq!(proactive_drain(used, cap), Continue, "{used:?} {cap:?}");
+        }
     }
 }
