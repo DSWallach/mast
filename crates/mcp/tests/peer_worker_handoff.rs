@@ -521,25 +521,95 @@ async fn an_ask_ceiling_peer_cannot_approve_a_workers_command_via_respond_to_inp
 mod test_isolation;
 
 impl Rig {
-    /// A Lead the Manager starts on B (it has no work item there): the id of its
-    /// item on A, the paths its lease covers.
-    async fn start_lead(&self, tools: &Tools, item: &str, paths: &[&str]) -> Result<String, String> {
-        let created = tools
+    /// A project on A with a Manager (a standing-role chat), and the MCP server that
+    /// Manager speaks through. Returns the Manager's chat id.
+    async fn manager_world(&self) -> (String, Tools, impl Sized) {
+        let admin = mast_rpc::memory_client(self.a.rpc_service());
+        admin
+            .call(mast_rpc::methods::WORK_OUTLINE_MUTATE, json!({ "op": "createWorkItem", "spaceId": SPACE_A, "title": "Project", "operationId": "op-project" }))
+            .await
+            .unwrap();
+        let project = mast_proto::derive_id("op-project", mast_proto::roles::ITEM);
+        admin
+            .call(mast_rpc::methods::WORK_OUTLINE_MUTATE, json!({ "op": "updateWorkItem", "workItemId": project, "changes": { "isProject": true }, "operationId": "op-mark" }))
+            .await
+            .unwrap();
+        let launch = mast_proto::CreateChatForWorkItemParams {
+            work_item_id: project.clone(),
+            initial_prompt: mast_proto::WorkItemPrompt { text: "Manage".into(), attachments: Vec::new() },
+            config: Some(mast_proto::ChatConfig {
+                approval_rules: false,
+                harness: HarnessId::ClaudeCode,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: mast_proto::SandboxLevel::WorkspaceWrite,
+                auto_approve: true,
+            }),
+            execution_override: None,
+            worktree_choice: None,
+            operation_id: "op-manager".into(),
+            parent_chat_id: None,
+            target_device_id: None,
+            account_id: None,
+            standing_role: Some(mast_proto::StandingRoleKind::Manager),
+        };
+        admin.call(methods::CREATE_CHAT_FOR_WORK_ITEM, serde_json::to_value(&launch).unwrap()).await.unwrap();
+        let manager = mast_proto::derive_id("op-manager", mast_proto::roles::CHAT);
+        wait_until(15, "the Manager role", || self.a.workspace.standing_role_chat(mast_proto::StandingRoleKind::Manager, &project).as_deref() == Some(manager.as_str())).await;
+        let lease = self.a.sessions.agent_tokens().mint(&manager, "run-1", SPACE_A, &self.a.device_id);
+        let tools = Tools::new(Arc::new(Mast::with_client(mast_rpc::memory_client(self.a.rpc_service()), Some(lease.token().to_owned()))));
+        (manager, tools, lease)
+    }
+
+    /// A work item in the project (under it), with the paths its Lead's lease would cover.
+    async fn lead_item(&self, title: &str, paths: &[&str]) -> String {
+        let admin = mast_rpc::memory_client(self.a.rpc_service());
+        let project = mast_proto::derive_id("op-project", mast_proto::roles::ITEM);
+        let op = format!("item-{title}");
+        admin
+            .call(mast_rpc::methods::WORK_OUTLINE_MUTATE, json!({ "op": "createWorkItem", "spaceId": SPACE_A, "parentWorkItemId": project, "title": title, "operationId": op }))
+            .await
+            .unwrap();
+        let id = mast_proto::derive_id(&op, mast_proto::roles::ITEM);
+        admin
+            .call(mast_rpc::methods::WORK_OUTLINE_MUTATE, json!({ "op": "updateWorkItem", "workItemId": id, "changes": { "taskSpec": { "ownedPaths": paths } }, "operationId": format!("spec-{title}") }))
+            .await
+            .unwrap();
+        id
+    }
+
+    /// The Manager asks its own server for a Lead of `item` on B.
+    async fn start_lead(&self, manager_tools: &Tools, item: &str) -> Result<String, String> {
+        let created = manager_tools
             .call(
                 "create_chat",
-                json!({ "project": SPACE_B, "parent": MANAGER, "standingRole": "lead", "leadItemId": item,
-                        "leadOwnedPaths": paths, "title": format!("Lead {item}"), "harness": "claude-code" }),
+                json!({ "idempotencyKey": format!("lead-{item}"), "standingRole": "lead", "workItemId": item, "peer": "fedora",
+                        "peerProject": SPACE_B, "harness": "claude-code" }),
             )
             .await?;
         Ok(created["chatId"].as_str().unwrap().to_string())
+    }
+
+    async fn wait_for_update_to(&self, manager: &str, needle: &str) -> String {
+        let mut found = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+        while found.is_none() {
+            assert!(tokio::time::Instant::now() < deadline, "the Manager never received {needle:?}; saw {:?}", self.manager_updates());
+            self.a.orchestrator_wakes.deliver_now(manager).await;
+            found = self.manager_updates().into_iter().find(|p| p.contains(needle));
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        found.unwrap()
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_peer_hosted_lead_is_read_only_reports_a_digest_and_keeps_to_its_subtree() {
     let rig = Rig::start(true).await;
-    let tools = rig.manager_tools();
-    let lead = rig.start_lead(&tools, "item-slice", &["crates/a/**"]).await.unwrap();
+    let (manager, manager_tools, _manager_lease) = rig.manager_world().await;
+    let item = rig.lead_item("Slice", &["crates/a/**"]).await;
+    let lead = rig.start_lead(&manager_tools, &item).await.unwrap();
     // Read-only on B whatever the Manager asked for.
     let row = rig.b.workspace.chat(&lead).unwrap().unwrap();
     assert_eq!(row.config.unwrap().sandbox, mast_proto::SandboxLevel::ReadOnly);
@@ -568,59 +638,44 @@ async fn a_peer_hosted_lead_is_read_only_reports_a_digest_and_keeps_to_its_subtr
     let sent = lead_tools.call("report_to_parent", json!({ "text": long })).await.unwrap();
     assert_eq!(sent["sent"]["delivery"], "queuedForRemoteParent");
     assert_eq!(sent["sent"]["truncated"], true);
-    let update = rig.wait_for_manager_update("[Lead digest, item item-slice").await;
+    let update = rig.wait_for_update_to(&manager, "[Lead digest, item ").await;
     assert!(update.contains("Slice merged on fedora."), "{update}");
     assert!(update.len() < 3_000, "{} bytes", update.len());
-    let (leaf_report, _) = (leaf_tools.call("report_to_parent", json!({ "text": "LEAF-NOISE tests green" })).await, ());
-    leaf_report.unwrap();
+    leaf_tools.call("report_to_parent", json!({ "text": "LEAF-NOISE tests green" })).await.unwrap();
     tokio::time::sleep(Duration::from_secs(1)).await;
-    rig.a.orchestrator_wakes.deliver_now(MANAGER).await;
+    rig.a.orchestrator_wakes.deliver_now(&manager).await;
     assert!(rig.manager_updates().iter().all(|u| !u.contains("LEAF-NOISE")), "the Manager hears only the digest: {:?}", rig.manager_updates());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_peer_hosted_lead_marks_a_completed_report_done() {
     let rig = Rig::start(true).await;
-    let tools = rig.manager_tools();
-    let lead = rig.start_lead(&tools, "item-done", &[]).await.unwrap();
+    let (manager, manager_tools, _manager_lease) = rig.manager_world().await;
+    let item = rig.lead_item("Done slice", &[]).await;
+    let lead = rig.start_lead(&manager_tools, &item).await.unwrap();
     let (lead_tools, _lease) = rig.worker_tools(&lead);
     lead_tools
         .call("report_to_parent", json!({ "text": "Slice finished.", "completion": { "testedSha": "abcdef1", "evidence": "suite green" } }))
         .await
         .unwrap();
-    let update = rig.wait_for_manager_update("[Lead digest, item item-done").await;
+    let update = rig.wait_for_update_to(&manager, "[Lead digest, item ").await;
     assert!(update.contains("status: Done"), "{update}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn peer_leads_are_limited_to_four_per_manager_and_never_share_paths() {
+async fn a_paired_devices_server_cannot_start_a_lead() {
     let rig = Rig::start(true).await;
     let tools = rig.manager_tools();
-    let mut leads = Vec::new();
-    for n in 0..mast_proto::MAX_LEADS_PER_PROJECT {
-        leads.push(rig.start_lead(&tools, &format!("item-{n}"), &[&format!("crates/p{n}/**")]).await.unwrap());
-    }
-    let fifth = rig.start_lead(&tools, "item-4", &["crates/p4/**"]).await.unwrap_err();
-    assert!(fifth.contains("already has 4 Leads"), "{fifth}");
-    // Archiving one frees its slot; its lease is then free too.
-    rig.b.workspace.set_chat_archived(&leads[0], true).unwrap();
-    let overlap = rig.start_lead(&tools, "item-5", &["crates/p1/src"]).await.unwrap_err();
-    assert!(overlap.contains("Lead subtree lease"), "{overlap}");
-    rig.start_lead(&tools, "item-6", &["crates/fresh/**"]).await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_lead_needs_its_manager_as_parent_on_a_peer() {
-    let rig = Rig::start(true).await;
-    let tools = rig.manager_tools();
+    // The paired server's token reaches B only; B starts a Lead for the Manager's engine alone.
     let refused = tools
-        .call("create_chat", json!({ "project": SPACE_B, "standingRole": "lead", "leadItemId": "item-x", "harness": "claude-code" }))
+        .call("create_chat", json!({ "project": SPACE_B, "parent": MANAGER, "standingRole": "lead", "workItemId": "item-x", "peer": "fedora", "harness": "claude-code", "prompt": "go" }))
         .await
         .unwrap_err();
-    assert!(refused.contains("parent"), "{refused}");
+    assert!(refused.contains("cannot start a Lead"), "{refused}");
     let refused = tools
         .call("create_chat", json!({ "project": SPACE_B, "parent": MANAGER, "standingRole": "lead", "harness": "claude-code" }))
         .await
         .unwrap_err();
-    assert!(refused.contains("leadItemId"), "{refused}");
+    assert!(refused.contains("workItemId"), "{refused}");
+    assert!(rig.b.workspace.read_chats().unwrap().iter().all(|chat| rig.b.workspace.peer_lead_item(&chat.id).is_none()));
 }

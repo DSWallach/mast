@@ -304,6 +304,16 @@ mod tests {
     use StandingRoleKind::{Lead, Manager};
 
     #[test]
+    fn a_warning_above_a_digest_stays_within_the_digest_cap() {
+        let notice = "[Lead tier warning: this project already has 4 Leads.]";
+        let digest = digest_for_manager("item", "chat", &"very long report ".repeat(2_000));
+        let whole = digest_with_notice(notice, &digest);
+        assert!(whole.starts_with(notice));
+        assert!(mast_proto::approx_tokens(&whole) <= mast_proto::MAX_LEAD_DIGEST_TOKENS, "{} tokens", mast_proto::approx_tokens(&whole));
+        assert_eq!(digest_with_notice(notice, "short"), format!("{notice}\nshort"));
+    }
+
+    #[test]
     fn a_lead_must_hang_off_the_manager() {
         let t = tree(&[("m", None, Some(Manager)), ("l", Some("m"), Some(Lead)), ("w", Some("l"), None)]);
         assert_eq!(check_lead_parent(Some("m"), &lookup(&t)), Ok(()));

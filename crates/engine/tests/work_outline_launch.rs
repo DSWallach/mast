@@ -6977,3 +6977,268 @@ async fn a_completed_lead_report_digests_as_done() {
     assert!(report.contains("status: Done"), "{report}");
     rig.core.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// A Lead on a paired device is admitted by the Manager's own engine.
+// ---------------------------------------------------------------------------
+
+const PEER_SPACE: &str = "space-peer";
+const PEER_CONFIG: fn() -> Value = || json!({ "harness": "claude-code", "model": null, "reasoning": null, "sandbox": "workspace-write" });
+
+struct PeerB {
+    _tmp: tempfile::TempDir,
+    core: EngineCore,
+    url: String,
+    token: String,
+}
+
+/// A second engine paired with the rig's: listening, saved in the rig's peer links as `fedora`.
+async fn start_peer_b(rig: &Rig) -> PeerB {
+    use mast_engine::peer_link::{PAIRING_PREFIX, PEER_PAIR_METHOD, PeerRegistry};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let harnesses = HarnessRegistry::new();
+    harnesses.register(Arc::new(InstructionMockHarness::default()));
+    let core = EngineCore::assemble(&data, Arc::new(harnesses), HarnessId::Mock, None).expect("peer engine assembles");
+    let repo = root.join("repo");
+    init_repo(&repo, "README");
+    let admin = mast_rpc::memory_client(core.rpc_service());
+    admin
+        .call(methods::MUTATE, json!({ "op": "createSpace", "spaceId": PEER_SPACE, "deviceId": core.device_id, "path": repo.to_string_lossy() }))
+        .await
+        .unwrap();
+    let registry = PeerRegistry::open(&data).unwrap();
+    core.orchestrator_wakes.set_remote_reports(registry.clone());
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let url = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    tokio::spawn(mast_rpc::serve_ws_listener_authed(listener, registry.authenticator(core.rpc_service())));
+    let code = registry.open_pairing().unwrap();
+    let pairing = mast_rpc::connect_ws_bearer(&url, Some(&format!("{PAIRING_PREFIX}{code}"))).await.unwrap();
+    let token = pairing.call(PEER_PAIR_METHOD, json!({ "label": "mac" })).await.unwrap()["token"].as_str().unwrap().to_string();
+    mast_engine::peer_outbound::save_links(
+        &rig.root.join("data"),
+        &mast_engine::peer_outbound::Links { peers: vec![mast_engine::peer_outbound::SavedPeer { name: "fedora".into(), url: url.clone(), token: token.clone() }] },
+    )
+    .unwrap();
+    PeerB { _tmp: tmp, core, url, token }
+}
+
+/// The Manager (or any chat) asks its engine to start a Lead for `item` on the paired device.
+async fn peer_lead(rig: &Rig, caller: &str, key: &str, item: &str) -> Result<Value, String> {
+    let lease = rig.core.sessions.agent_tokens().mint(caller, key, SPACE, &rig.core.device_id);
+    rig.client
+        .call(
+            mast_proto::agent_tools::TOOL_CALL_METHOD,
+            json!({ "token": lease.token(), "tool": mast_proto::agent_tools::tools::LAUNCH_PEER_LEAD, "arguments": {
+                "idempotencyKey": key, "workItemId": item, "peer": "fedora", "spaceId": PEER_SPACE, "config": PEER_CONFIG() } }),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn peer_lead_chats(b: &PeerB) -> Vec<String> {
+    b.core
+        .workspace
+        .read_chats()
+        .unwrap()
+        .into_iter()
+        .filter(|chat| b.core.workspace.peer_lead_item(&chat.id).is_some())
+        .map(|chat| chat.id)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_lead_is_admitted_by_the_managers_engine_and_a_bare_create_chat_cannot_start_one() {
+    let (rig, manager) = lead_rig().await;
+    let b = start_peer_b(&rig).await;
+    let slice = lead_item(&rig, "Slice", None, json!({ "ownedPaths": ["crates/a/**"] })).await;
+    let made = peer_lead(&rig, &manager, "pl-1", &slice).await.unwrap();
+    let chat = made["chatId"].as_str().unwrap().to_owned();
+    let row = b.core.workspace.chat(&chat).unwrap().unwrap();
+    assert_eq!(row.config.unwrap().sandbox, SandboxLevel::ReadOnly, "a Lead never writes");
+    assert_eq!(b.core.workspace.peer_lead_item(&chat).as_deref(), Some(slice.as_str()));
+    // A retry of the same launch is the same Lead.
+    assert_eq!(peer_lead(&rig, &manager, "pl-1", &slice).await.unwrap()["chatId"], chat.as_str());
+    assert_eq!(peer_lead_chats(&b), vec![chat.clone()]);
+
+    // The peer honours a Lead only on the engine's path: the token a paired
+    // MCP server holds cannot start one with a plain createChat.
+    let bare = mast_rpc::connect_ws_bearer(&b.url, Some(&b.token)).await.unwrap();
+    for lead in [json!({ "leadItemId": "sneaky-item" }), json!({ "leadOwnedPaths": ["crates/**"] })] {
+        let mut create = json!({ "op": "createChat", "chatId": "sneaky", "spaceId": PEER_SPACE, "deviceId": b.core.device_id,
+                                 "parentChatId": manager, "config": PEER_CONFIG() });
+        create.as_object_mut().unwrap().extend(lead.as_object().unwrap().clone());
+        let refused = bare.call(methods::MUTATE, create).await.unwrap_err().to_string();
+        assert!(refused.contains("started by the Manager's engine"), "{refused}");
+    }
+    assert!(b.core.workspace.chat("sneaky").unwrap().is_none());
+    // Its Lead-ness shows on the peer's own gate: a Lead is never writable.
+    let refused = bare
+        .call("PeerLeadCreate", json!({ "chatId": "no-config", "deviceId": b.core.device_id, "spaceId": PEER_SPACE, "parentChatId": manager,
+                                        "leadItemId": "item-x", "config": null }))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("needs a config"), "{refused}");
+    assert!(b.core.workspace.chat("no-config").unwrap().is_none(), "no partial config is made up");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_manager_can_start_a_peer_lead_not_a_lead_or_a_worker_under_one() {
+    let (rig, manager) = lead_rig().await;
+    let b = start_peer_b(&rig).await;
+    let slice = lead_item(&rig, "Slice", None, json!({})).await;
+    let leaf = lead_item(&rig, "Leaf", Some(&slice), json!({})).await;
+    let other = lead_item(&rig, "Other", None, json!({})).await;
+    let lead = start_lead(&rig, &slice, "lead", Some(&manager)).await.unwrap();
+    let worker = start_worker(&rig, &leaf, "worker", &lead).await.unwrap();
+    // A Lead reaches the engine's admission and is refused there; a depth-2
+    // Worker is turned away by its role. Neither starts anything on the peer.
+    let refused = peer_lead(&rig, &lead, "by-lead", &other).await.unwrap_err();
+    assert!(refused.contains("must be started by the project's Manager"), "{refused}");
+    let refused = peer_lead(&rig, &worker, "by-worker", &other).await.unwrap_err();
+    assert!(refused.contains("not available to this role") || refused.contains("must be started by the project's Manager"), "{refused}");
+    assert!(peer_lead_chats(&b).is_empty());
+    peer_lead(&rig, &manager, "by-manager", &other).await.unwrap();
+    assert_eq!(peer_lead_chats(&b).len(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn four_leads_across_local_and_peer_is_the_limit_and_the_count_survives_a_manager_handoff() {
+    let (rig, manager) = lead_rig().await;
+    let b = start_peer_b(&rig).await;
+    let mut items = Vec::new();
+    for n in 0..6 {
+        items.push(lead_item(&rig, &format!("Slice {n}"), None, json!({ "ownedPaths": [format!("crates/s{n}/**")] })).await);
+    }
+    start_lead(&rig, &items[0], "local-0", Some(&manager)).await.unwrap();
+    start_lead(&rig, &items[1], "local-1", Some(&manager)).await.unwrap();
+    peer_lead(&rig, &manager, "peer-2", &items[2]).await.unwrap();
+    peer_lead(&rig, &manager, "peer-3", &items[3]).await.unwrap();
+    let fifth = peer_lead(&rig, &manager, "peer-4", &items[4]).await.unwrap_err();
+    assert!(fifth.contains("already has 4 Leads"), "{fifth}");
+    // A fifth local Lead is refused for the same reason: the two on the peer count.
+    let fifth_local = start_lead(&rig, &items[4], "local-4", Some(&manager)).await.unwrap_err();
+    assert!(fifth_local.message.contains("already has 4 Leads"), "{}", fifth_local.message);
+
+    // The Manager hands off; its successor inherits the project, and the count with it.
+    rig.client
+        .call(methods::HAND_OFF_ORCHESTRATOR, json!({ "chatId": manager, "summary": "Continue", "operationId": "lead-count-handoff", "archive": true }))
+        .await
+        .unwrap();
+    wait_for(|| manager_chat(&rig).is_some_and(|chat| chat != manager), "successor Manager").await;
+    let successor = manager_chat(&rig).unwrap();
+    settle(&rig, &successor).await;
+    let still = peer_lead(&rig, &successor, "peer-4-again", &items[4]).await.unwrap_err();
+    assert!(still.contains("already has 4 Leads"), "{still}");
+    let still_local = start_lead(&rig, &items[5], "local-5", Some(&successor)).await.unwrap_err();
+    assert!(still_local.message.contains("already has 4 Leads"), "{}", still_local.message);
+    // A peer Lead archived on its device frees its slot.
+    let freed = peer_lead_chats(&b)[0].clone();
+    b.core.workspace.set_chat_archived(&freed, true).unwrap();
+    peer_lead(&rig, &successor, "peer-4-freed", &items[4]).await.unwrap();
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_lead_and_a_local_lead_never_hold_overlapping_paths() {
+    let (rig, manager) = lead_rig().await;
+    let _b = start_peer_b(&rig).await;
+    let local = lead_item(&rig, "Local slice", None, json!({ "ownedPaths": ["crates/a/**"] })).await;
+    let overlapping = lead_item(&rig, "Overlapping peer slice", None, json!({ "ownedPaths": ["crates/a/src"] })).await;
+    let disjoint = lead_item(&rig, "Disjoint peer slice", None, json!({ "ownedPaths": ["crates/b/**"] })).await;
+    let local_overlap = lead_item(&rig, "Overlapping local slice", None, json!({ "ownedPaths": ["crates/b/lib"] })).await;
+    start_lead(&rig, &local, "local", Some(&manager)).await.unwrap();
+    let refused = peer_lead(&rig, &manager, "peer-overlap", &overlapping).await.unwrap_err();
+    assert!(refused.contains("Lead subtree lease"), "{refused}");
+    peer_lead(&rig, &manager, "peer-disjoint", &disjoint).await.unwrap();
+    // And the other way round: a local Lead against the one on the peer.
+    let refused = start_lead(&rig, &local_overlap, "local-overlap", Some(&manager)).await.unwrap_err();
+    assert!(refused.message.contains("Lead subtree lease"), "{}", refused.message);
+    rig.core.shutdown().await;
+}
+
+/// A paired device that does not advertise `lead-tier-v1`: answers an engine-info
+/// call and records everything else.
+struct OldPeer {
+    calls: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl mast_rpc::RpcService for OldPeer {
+    async fn handle(&self, method: &str, _params: Value) -> Result<mast_rpc::RpcReply, mast_rpc::RpcError> {
+        self.calls.lock().unwrap().push(method.to_owned());
+        match method {
+            methods::ENGINE_INFO => mast_rpc::RpcReply::value(&json!({ "deviceId": "old-device", "workspaceScope": "local", "capabilities": ["standing-role-launch-v1"] })),
+            methods::LOCAL_DEVICE => mast_rpc::RpcReply::value(&json!({ "deviceId": "old-device" })),
+            _ => mast_rpc::RpcReply::value(&json!({ "leads": [] })),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_without_lead_tier_v1_is_refused_at_create() {
+    let (rig, manager) = lead_rig().await;
+    let slice = lead_item(&rig, "Slice", None, json!({})).await;
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let url = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    // An open stub: it checks no token, as it never claims to be the real gate.
+    tokio::spawn(mast_rpc::serve_ws_listener_authed(
+        listener,
+        Arc::new({
+            let service: Arc<dyn mast_rpc::RpcService> = Arc::new(OldPeer { calls: calls.clone() });
+            move |_token: Option<&str>| Some(mast_rpc::PeerSession { service: service.clone(), revoked: Arc::new(tokio::sync::Notify::new()) })
+        }),
+    ));
+    mast_engine::peer_outbound::save_links(
+        &rig.root.join("data"),
+        &mast_engine::peer_outbound::Links { peers: vec![mast_engine::peer_outbound::SavedPeer { name: "fedora".into(), url, token: "t".into() }] },
+    )
+    .unwrap();
+    let refused = peer_lead(&rig, &manager, "old", &slice).await.unwrap_err();
+    assert!(refused.contains("lead-tier-v1"), "{refused}");
+    assert!(!calls.lock().unwrap().iter().any(|m| m == "PeerLeadCreate" || m == methods::MUTATE), "{:?}", calls.lock().unwrap());
+    rig.core.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// The firewall holds for scheduled runs.
+// ---------------------------------------------------------------------------
+
+async fn scheduled_run_parent(rig: &Rig, id: &str, item: &str) -> Option<String> {
+    let draft = mast_proto::ScheduledTaskDraft {
+        name: format!("Task {id}"), prompt: format!("Scheduled work {id}"),
+        cwd: rig.repo.to_string_lossy().into_owned(), space_id: Some(SPACE.into()),
+        config: params(rig, "unused", "unused").config.unwrap(),
+        schedule: mast_proto::TaskSchedule::Cron { expression: "0 8 * * 1-5".into(), timezone: "UTC".into() },
+        enabled: false, grace_minutes: 360, cutover_confirmed: false, work_item_id: Some(item.to_owned()),
+        output: Default::default(), after_success: Default::default(), chat_mode: Default::default(), refresh: Default::default(), write_to_notion: None,
+    };
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::Save { id: id.into(), expected_revision: 0, draft, operation_id: format!("save-{id}") }).await.unwrap();
+    rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::RunNow { id: id.into(), operation_id: format!("run-{id}") }).await.unwrap();
+    rig.core.scheduled_tasks.tick(chrono::Utc::now().timestamp_millis()).await.unwrap();
+    let snapshot = rig.core.scheduled_tasks.request(mast_proto::ScheduledTasksRequest::List).await.unwrap();
+    let chat = snapshot.runs.iter().find(|run| run.task_id == id).and_then(|run| run.chat_id.clone())?;
+    rig.core.workspace.chat(&chat).unwrap().unwrap().parent_chat_id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scheduled_run_inside_a_leads_slice_reports_to_that_lead_and_any_other_to_the_manager() {
+    let (rig, manager) = lead_rig().await;
+    let slice = lead_item(&rig, "Slice", None, json!({})).await;
+    let inside = lead_item(&rig, "Inside the slice", Some(&slice), json!({})).await;
+    let outside = lead_item(&rig, "Outside", None, json!({})).await;
+    let lead = start_lead(&rig, &slice, "lead", Some(&manager)).await.unwrap();
+    settle(&rig, &lead).await;
+    assert_eq!(scheduled_run_parent(&rig, "inside-task", &inside).await.as_deref(), Some(lead.as_str()));
+    assert_eq!(scheduled_run_parent(&rig, "outside-task", &outside).await.as_deref(), Some(manager.as_str()));
+    // Once the Lead is archived its slice is the Manager's again.
+    rig.core.workspace.set_chat_archived(&lead, true).unwrap();
+    assert_eq!(scheduled_run_parent(&rig, "after-task", &inside).await.as_deref(), Some(manager.as_str()));
+    rig.core.shutdown().await;
+}

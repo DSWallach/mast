@@ -101,16 +101,25 @@ A Lead hands off like any other chat (`hand_off_orchestrator`). The successor ta
 
 ### A Lead on a paired device
 
-A Lead can run on a paired device (for example the desktop). On the paired device's Mast MCP server, start it with `create_chat`, `standingRole: lead`, `parent` set to your Manager chat, `leadItemId` set to the slice's work item on your device, and optionally `leadOwnedPaths`. The paired device must be on a build that advertises `lead-tier-v1`; an older one is refused instead of running the Lead as a plain chat.
+A Lead can run on a paired device (for example the desktop). Start it from your own Mast server, not the paired device's: `create_chat` with `standingRole: lead`, `workItemId` set to the slice's item, `peer` set to the paired device's saved name (`mast peer list`), and `peerProject` set to a Space id on that device (its `list_projects`). The Lead exists there with no task yet: send its first prompt with the paired device's `send_message`. The paired device must be on a build that advertises `lead-tier-v1`; an older one is refused before anything is created.
 
-The same rules hold, split between the two devices:
+Your own engine admits the Lead, exactly as it does a local one, before it asks the device to create it:
 
-- The paired device refuses a fifth Lead of one Manager (archived Leads free their slot) and a Lead whose `leadOwnedPaths` overlap another's. It runs the Lead read-only, caps its Workers at six and depth at two, and lets it reach only its own Workers.
-- Its report crosses the link as a Lead digest, and your device bounds it again if a sender left it whole. Your device, which sees every Lead of the project, adds a `[Lead tier warning: ...]` line when the project is over its four Leads or the Lead's item `ownedPaths` overlap another Lead's lease. It does not refuse a digest, so you hear what the Lead has to say.
+- Only the project's Manager may start it. A Lead, or a Worker of one, is refused.
+- The four-Lead limit counts the Leads on your device and on every paired device together, so a fifth Lead is refused wherever it would run. The count lives with the project, so it survives a Manager hand-off. A Lead archived on its device, or whose item is Completed, frees its slot.
+- The Lead's lease comes from its item's `ownedPaths` in your outline, and is checked against every other Lead of the project, local or paired.
+- A paired device creates a Lead only for this request. A plain `createChat` that names a Lead is refused there, so a paired device's MCP server cannot start one. As defence in depth the device also refuses a fifth Lead and overlapping paths of its own peer's Leads.
+
+Once running, the same rules hold, split between the two devices:
+
+- The paired device runs the Lead read-only, caps its Workers at six and depth at two, and lets it reach only its own Workers.
+- Its report crosses the link as a Lead digest, and your device bounds it again if a sender left it whole, warning line included, to 350 tokens. Your device adds a `[Lead tier warning: ...]` line when the project is over its four Leads or the Lead's item `ownedPaths` overlap another Lead's lease. It does not refuse a digest, so you hear what the Lead has to say.
 - A Worker of a Lead never reports to the Manager, even after its Lead is archived.
 - A Lead whose work item is Completed frees its slot and lease even if its chat is not archived. A report sent with a completion reads `status: Done`.
 
-Scheduled runs on an item inside a Lead's slice are not routed through the Lead: a scheduled run is a standalone chat with no parent, so it is not one of the Lead's Workers and does not count against its six. Its result is read from the task's own output.
+Not yet covered for a Lead on a paired device: handing it off, and keeping the paired-device count across an engine restart (it is asked from the devices at every Lead launch, so a restart loses nothing, but a device that is down counts as it last did).
+
+Scheduled runs keep the firewall too. A scheduled run on an item inside a live Lead's slice is a child of that Lead and reports to it, not to the Manager; a scheduled run on any other item of the project reports to the Manager. Once the Lead is archived or its item is Completed, its slice's runs go back to the Manager. A scheduled run does not count against the Lead's six Workers.
 
 ## Queue wakes
 
