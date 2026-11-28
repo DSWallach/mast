@@ -187,6 +187,11 @@ pub fn reboot_session(
     runtime: &Arc<tokio::runtime::Runtime>,
     render: bool,
 ) -> Result<Session, String> {
+    // The closed app's in-process engine cannot be shut down from here and
+    // still holds the instance lock. Unlinking the file gives the next engine
+    // a fresh lock, as `Template::restore` does for a reset; the old engine has
+    // no window left to act for it.
+    let _ = std::fs::remove_file(scratch.data().join("engine.lock"));
     let rows = runtime.block_on(async {
         let core = crate::materialize::open_core(scratch.data())?;
         let rows = crate::materialize::load_rows(world, &core, false);
