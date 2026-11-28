@@ -2432,6 +2432,13 @@ impl RpcService for AuthRpc {
 
 #[async_trait]
 impl RpcService for EngineRpc {
+    // STACK RULE: in a debug build the poll frame of this one future is ~1 MB, and a tool call
+    // (`mast_manage`) polls it again for the method it runs, so two nest inside a 2 MiB tokio
+    // worker stack. Do not await a large async fn's future directly in an arm here (the future is
+    // built in this frame even under `Box::pin(...)`): put it behind a plain fn that returns a boxed
+    // future, as `launch_peer_lead` does. The guard is `agent_tools::assistant_management_*`, which
+    // aborts with a stack overflow, and only under `cargo nextest run --workspace` (feature
+    // unification); see docs/internal/testing/baseline-2026-11-28.md.
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.

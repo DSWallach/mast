@@ -1,1 +1,1 @@
-- Tests: a clean workspace-wide nextest baseline (8068 tests); fixed stale worker-model, reconcile-helper and component lint budget tests.
+- Tests: a clean workspace-wide nextest baseline (8092 tests); fixed stale worker-model, reconcile-helper and load-sensitive tests, tightened the component lint budget with a new caption size token, and fixed a debug-build stack overflow in the RPC dispatch under the workspace feature set.
