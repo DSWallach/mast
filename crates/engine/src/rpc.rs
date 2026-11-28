@@ -494,6 +494,7 @@ impl EngineRpc {
             None,
             crate::orchestrator_wakes::system_clock(),
         );
+        let quota = crate::quota_probes::QuotaService::shared(&workspace.store_root());
         Self {
             sessions,
             doc_host,
@@ -513,7 +514,7 @@ impl EngineRpc {
             uploads,
             agent_accounts,
             managed_accounts: None,
-            quota: Default::default(),
+            quota,
             auth: None,
             links: None,
             updater: None,

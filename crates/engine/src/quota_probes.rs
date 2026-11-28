@@ -11,8 +11,9 @@
 //! provider is probed at most once per poll interval however often it is read.
 //! Nothing here dispatches work.
 
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 
 use chrono::{DateTime, Utc};
 use mast_proto::{HarnessId, ScopedUsageWindow};
@@ -176,7 +177,23 @@ struct Inner {
     broker: tokio::sync::Mutex<Option<(QuotaSettings, Arc<QuotaBroker>)>>,
 }
 
+/// An engine builds one RPC surface per transport (in-app, relay, peers), so
+/// the service is shared per profile store: otherwise each surface would probe
+/// on its own schedule. Weak, so it goes when the last surface does.
+static SERVICES: LazyLock<Mutex<HashMap<PathBuf, Weak<Inner>>>> = LazyLock::new(Mutex::default);
+
 impl QuotaService {
+    pub(crate) fn shared(store_root: &Path) -> Self {
+        let mut services = lock(&SERVICES);
+        services.retain(|_, service| service.strong_count() > 0);
+        if let Some(inner) = services.get(store_root).and_then(Weak::upgrade) {
+            return Self(inner);
+        }
+        let service = Self::default();
+        services.insert(store_root.to_path_buf(), Arc::downgrade(&service.0));
+        service
+    }
+
     /// The broker for the saved caps, with every due provider polled. Changed
     /// caps rebuild it; it holds no reservations since nothing dispatches.
     async fn refreshed(
@@ -439,6 +456,17 @@ mod tests {
         };
         quota_settings::save(root.path(), &settings).unwrap();
         assert_eq!(read().await.unwrap().wake, None);
+    }
+
+    #[test]
+    fn surfaces_of_one_profile_share_a_service() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let first = QuotaService::shared(a.path());
+        assert!(Arc::ptr_eq(&first.0, &QuotaService::shared(a.path()).0));
+        assert!(!Arc::ptr_eq(&first.0, &QuotaService::shared(b.path()).0));
+        let weak = Arc::downgrade(&first.0);
+        drop(first);
+        assert!(weak.upgrade().is_none(), "the registry keeps nothing alive");
     }
 
     #[test]
