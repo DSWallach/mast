@@ -50,7 +50,7 @@ Cap modes are not active in Mast yet. The quota broker that makes these decision
 
 Once connected, it will check each provider's usage every 90 seconds (180 seconds for Antigravity `/usage`) while orchestration is active. It will only read usage and never refresh a single-use sign-in token. If a provider can't be read, it will use an estimate from local token usage. A provider that needs sign-in, or has neither a reading nor an estimate, will get no new work.
 
-- **Balanced failover** (default): new work will be spread by the room each provider has below the 85% hard cap. A provider will keep the work until it reaches the 78% soft cap. When no provider can take work, orchestration will pause and try again when one may have room.
+- **Balanced failover** (default): new work will be spread by the room each provider has below the 85% hard cap. A provider will keep the work until it reaches the 78% soft cap and another provider below that cap has room. When no provider can take work, orchestration will pause and try again when one may have room.
 - **Pinned freeze**: for pinned projects. Work will never move to another provider. When work would pass 90%, or the provider's usage can't be trusted, Mast will freeze, save a checkpoint and notify you.
 
 ## Antigravity account homes

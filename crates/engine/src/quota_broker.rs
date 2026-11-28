@@ -7,8 +7,8 @@
 //! token expired marks the provider `needs_sign_in` instead of refreshing it.
 //!
 //! - `BalancedFailover`: dispatch is weighted by headroom below `hard_cap`;
-//!   stay on the current provider until it reaches `soft_cap`; pause when no
-//!   provider is eligible.
+//!   stay on the current provider until it reaches `soft_cap` and another one
+//!   below `soft_cap` has room; pause when no provider is eligible.
 //! - `PinnedFreeze`: never fail over; answer `Freeze` when the work would
 //!   pass `freeze_cap`. Checkpointing and notifying are the caller's job.
 //!
@@ -17,7 +17,7 @@
 //! that needs sign-in (even with a local estimate).
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -103,6 +103,9 @@ pub struct BrokerConfig {
     pub freeze_cap: f32,
     pub poll_interval: Duration,
     pub agy_poll_interval: Duration,
+    /// Longest any reservation counts, whether or not probes succeed. Should
+    /// exceed both poll intervals.
+    pub reservation_ttl: Duration,
 }
 
 impl Default for BrokerConfig {
@@ -113,6 +116,7 @@ impl Default for BrokerConfig {
             freeze_cap: 0.90,
             poll_interval: Duration::from_secs(90),
             agy_poll_interval: Duration::from_secs(180),
+            reservation_ttl: Duration::from_secs(600),
         }
     }
 }
@@ -166,10 +170,20 @@ impl std::error::Error for InvalidBrokerConfig {}
 pub enum Decision {
     Dispatch(Provider),
     /// No provider is eligible. `resume_at` is the earliest time one may have
-    /// room again: a window reset, a reservation ageing out or, for usage with
-    /// no known reset, the next poll. A hint to decide again, not a promise.
-    /// `None` when waiting cannot help (every provider needs sign-in or has
-    /// unknown usage, or the cost alone exceeds `hard_cap`).
+    /// room again: a window reset, a reservation ageing out or expiring or,
+    /// for usage with no known reset, the next poll. A hint to decide again,
+    /// not a promise.
+    ///
+    /// `None` means no time can be predicted: every provider needs sign-in or
+    /// has unknown usage, or the cost alone exceeds `hard_cap`. It is not
+    /// permanent. A sign-in, a later successful poll or a smaller cost can
+    /// change the answer, so callers must keep polling and decide again rather
+    /// than park the work for good.
+    ///
+    /// `resume_at` can equal the current time when a poll is overdue. Callers
+    /// must run `poll_due` before deciding again and wait a minimum delay
+    /// between attempts: nothing is re-read while orchestration is inactive,
+    /// so sleeping only until `resume_at` could spin.
     PauseAll {
         resume_at: Option<DateTime<Utc>>,
     },
@@ -245,6 +259,11 @@ pub struct QuotaBroker {
 
 /// Every usage figure behind a provider, with the reset that clears it when
 /// one is known. Empty when usage is unknown.
+///
+/// Window scope is deliberately ignored: a dispatch does not say which model
+/// the work will use, so an exhausted model-family window caps the whole
+/// provider. This can hold back work another model could have taken, but never
+/// sends work into an exhausted window.
 fn usage_sources(p: &ProviderState) -> Vec<(f32, Option<DateTime<Utc>>)> {
     let Some(reading) = &p.reading else {
         return p.fallback_fraction.map(|f| (f, None)).into_iter().collect();
@@ -297,6 +316,20 @@ impl QuotaBroker {
         chrono::Duration::from_std(self.config.interval(provider)).unwrap()
     }
 
+    fn reservation_ttl(&self) -> chrono::Duration {
+        chrono::Duration::from_std(self.config.reservation_ttl).unwrap()
+    }
+
+    /// The state with expired reservations already dropped. Every access goes
+    /// through here, so the TTL holds even when nothing is polling.
+    fn lock_state(&self) -> MutexGuard<'_, State> {
+        let mut state = self.state.lock().unwrap();
+        let now = self.clock.now();
+        let ttl = self.reservation_ttl();
+        state.reservations.retain(|_, r| now - r.taken_at < ttl);
+        state
+    }
+
     /// Polling happens only while orchestration is active.
     pub fn set_orchestration_active(&self, active: bool) {
         self.state.lock().unwrap().active = active;
@@ -307,13 +340,13 @@ impl QuotaBroker {
     ///
     /// A successful probe drops that provider's reservations that are at least
     /// one poll interval old: the reading has had time to include their usage,
-    /// so keeping them would count it twice, and a reservation that was never
-    /// released cannot hold headroom for good. Younger ones are kept. A failed
-    /// probe drops none.
+    /// so keeping them would count it twice. Younger ones are kept. A failed
+    /// probe drops none; `reservation_ttl` bounds how long a reservation that
+    /// is never released can hold headroom while probes keep failing.
     pub fn poll_due(&self) -> Vec<Provider> {
         let now = self.clock.now();
         let due: Vec<Provider> = {
-            let state = self.state.lock().unwrap();
+            let state = self.lock_state();
             if !state.active {
                 return Vec::new();
             }
@@ -334,7 +367,7 @@ impl QuotaBroker {
                 Ok(_) => None,
                 Err(_) => self.fallback.local_fraction(*provider),
             };
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.lock_state();
             if result.is_ok() {
                 let max_age = self.interval(*provider);
                 state
@@ -363,7 +396,7 @@ impl QuotaBroker {
     /// dispatches see it before the next poll. Returns a reservation id.
     pub fn reserve(&self, provider: Provider, fraction: f32) -> u64 {
         let now = self.clock.now();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         Self::reserve_locked(&mut state, provider, fraction, now)
     }
 
@@ -386,20 +419,20 @@ impl QuotaBroker {
         id
     }
 
-    /// A no-op for a reservation already released or aged out by a poll.
+    /// A no-op for a reservation already released, aged out or expired.
     pub fn release(&self, id: u64) {
-        self.state.lock().unwrap().reservations.remove(&id);
+        self.lock_state().reservations.remove(&id);
     }
 
     /// Used fraction including in-flight reservations; `None` when unknown.
     pub fn effective_fraction(&self, provider: Provider) -> Option<f32> {
-        self.state.lock().unwrap().effective(provider)
+        self.lock_state().effective(provider)
     }
 
     /// Choose where the next unit of work runs, without reserving anything.
     pub fn decide(&self, policy: ProviderQuotaPolicy, pinned: Provider) -> Decision {
         let now = self.clock.now();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         self.decide_locked(&mut state, policy, pinned, 0.0, now)
     }
 
@@ -415,7 +448,7 @@ impl QuotaBroker {
         cost: f32,
     ) -> (Decision, Option<u64>) {
         let now = self.clock.now();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         let decision = self.decide_locked(&mut state, policy, pinned, cost, now);
         let id = match decision {
             Decision::Dispatch(provider) => {
@@ -463,18 +496,19 @@ impl QuotaBroker {
                 .min();
             return Decision::PauseAll { resume_at };
         }
-        // Sticky below the soft cap; at or past it, fail over if anyone else
-        // has room.
+        // Sticky: leave the current provider only once it is at or past the
+        // soft cap and another one with room is still below it, and then pick
+        // among those. When every provider with room is past the soft cap,
+        // stay put; moving between them would only alternate.
         let current = state
             .current
             .filter(|c| headroom.iter().any(|(p, _)| p == c));
         if let Some(current) = current {
-            if state.effective(current).is_some_and(|f| f < cfg.soft_cap) {
+            let below_soft = |p: Provider| state.effective(p).is_some_and(|f| f < cfg.soft_cap);
+            if below_soft(current) || !headroom.iter().any(|(p, _)| below_soft(*p)) {
                 return Decision::Dispatch(current);
             }
-            if headroom.len() > 1 {
-                headroom.retain(|(p, _)| *p != current);
-            }
+            headroom.retain(|(p, _)| below_soft(*p));
         }
         // Smooth weighted round-robin over headroom.
         let total: f32 = headroom.iter().map(|(_, h)| h).sum();
@@ -497,7 +531,7 @@ impl QuotaBroker {
 
     /// The earliest time a provider capped for `cost` may fit it. Every capped
     /// window must have reset (so the latest of those resets governs) and
-    /// enough reservations must have aged out. Usage with no future reset
+    /// enough reservations must have aged out or expired. Usage with no future reset
     /// (credit budget, local estimate, stale window) can next change at the
     /// next poll. `None` if waiting cannot help.
     fn room_again_at(
@@ -519,7 +553,14 @@ impl QuotaBroker {
             .reservations
             .values()
             .filter(|r| r.provider == provider)
-            .map(|r| (r.fraction, (r.taken_at + interval).max(next_poll)))
+            .map(|r| {
+                // The first successful poll at that age, or the TTL if sooner.
+                let aged_out = (r.taken_at + interval).max(next_poll);
+                (
+                    r.fraction,
+                    aged_out.min(r.taken_at + self.reservation_ttl()),
+                )
+            })
             .collect();
         let mut times: Vec<DateTime<Utc>> =
             usage.iter().chain(&reserved).map(|(_, at)| *at).collect();
@@ -540,7 +581,7 @@ impl QuotaBroker {
 
     /// One-line wake header, present only when a provider is above the soft cap.
     pub fn wake_header(&self) -> Option<String> {
-        let state = self.state.lock().unwrap();
+        let state = self.lock_state();
         let parts: Vec<String> = Provider::ALL
             .into_iter()
             .filter_map(|p| {
@@ -559,7 +600,7 @@ impl QuotaBroker {
 
     /// Read-only `quota_status` payload, kept under 550 bytes.
     pub fn status_payload(&self) -> Value {
-        let state = self.state.lock().unwrap();
+        let state = self.lock_state();
         let mut providers = serde_json::Map::new();
         for p in Provider::ALL {
             let entry = state.providers.get(&p);
@@ -731,6 +772,79 @@ mod tests {
     }
 
     #[test]
+    fn leaked_reservation_expires_during_a_probe_outage() {
+        let (b, clock, readings, _) = rig(Some(0.5));
+        b.set_orchestration_active(true);
+        b.poll_due();
+        b.reserve(Provider::Codex, 0.45);
+        let pinned = || b.decide(ProviderQuotaPolicy::PinnedFreeze, Provider::Codex);
+        clock.advance(Duration::from_secs(599));
+        b.poll_due();
+        assert!(matches!(pinned(), Decision::Freeze { .. }));
+        // The TTL applies without another poll, even while inactive.
+        b.set_orchestration_active(false);
+        clock.advance(Duration::from_secs(1));
+        assert_eq!(pinned(), Decision::Dispatch(Provider::Codex));
+        assert_eq!(b.effective_fraction(Provider::Codex), Some(0.5));
+        assert!(readings.lock().unwrap().is_empty(), "every probe failed");
+    }
+
+    #[test]
+    fn resume_uses_the_reservation_ttl_when_it_comes_before_the_next_poll() {
+        let (b, clock, readings, _) = rig(Some(0.0));
+        let t = clock.now();
+        let later = Some(t + chrono::Duration::minutes(60));
+        put(
+            &readings,
+            Provider::Antigravity,
+            vec![window(0.9, later)],
+            None,
+        );
+        put(
+            &readings,
+            Provider::ClaudeCode,
+            vec![window(0.9, later)],
+            None,
+        );
+        b.set_orchestration_active(true);
+        b.poll_due();
+        b.reserve(Provider::Codex, 0.875);
+        clock.advance(Duration::from_secs(540));
+        b.poll_due();
+        clock.advance(Duration::from_secs(50));
+        // Next codex poll is at 630 s; the reservation expires at 600 s.
+        assert_eq!(resume_at(&b, 0.0), Some(t + chrono::Duration::seconds(600)));
+    }
+
+    #[test]
+    fn per_window_credit_budget_counts_towards_usage() {
+        let (b, clock, readings, _) = rig(None);
+        let t = clock.now();
+        let at = |mins| Some(t + chrono::Duration::minutes(mins));
+        put(
+            &readings,
+            Provider::Antigravity,
+            vec![window(0.9, at(60))],
+            None,
+        );
+        put(
+            &readings,
+            Provider::ClaudeCode,
+            vec![window(0.9, at(60))],
+            None,
+        );
+        let credit_capped = ScopedUsageWindow {
+            credit_budget_fraction: Some(0.875),
+            ..window(0.1, at(30))
+        };
+        put(&readings, Provider::Codex, vec![credit_capped], None);
+        b.set_orchestration_active(true);
+        b.poll_due();
+        assert_eq!(b.effective_fraction(Provider::Codex), Some(0.875));
+        assert_eq!(resume_at(&b, 0.0), at(30));
+    }
+
+    #[test]
     fn never_polled_providers_are_not_dispatched() {
         let (b, _c, _r, _) = rig(None);
         assert_eq!(
@@ -867,43 +981,68 @@ mod tests {
         }
     }
 
+    /// Publish new readings and poll all three providers.
+    fn repoll(b: &QuotaBroker, clock: &MockClock, readings: &Readings, used: [f32; 3]) {
+        set(readings, used[0], used[1], used[2]);
+        clock.advance(Duration::from_secs(180));
+        b.poll_due();
+    }
+
+    fn balanced(b: &QuotaBroker) -> Decision {
+        b.decide(ProviderQuotaPolicy::BalancedFailover, Provider::Codex)
+    }
+
     #[test]
-    fn balanced_stays_below_soft_cap_and_fails_over_past_it() {
+    fn balanced_fails_over_past_soft_cap_to_a_provider_below_it() {
         let (b, clock, readings, _) = rig(None);
-        set(&readings, 0.1, 0.5, 0.5);
         b.set_orchestration_active(true);
-        b.poll_due();
-        let balanced = || b.decide(ProviderQuotaPolicy::BalancedFailover, Provider::Codex);
-        assert_eq!(balanced(), Decision::Dispatch(Provider::Antigravity));
+        // Pick claude over codex first, which leaves claude's round-robin
+        // credit negative: weighting alone would now favour agy over it.
+        repoll(&b, &clock, &readings, [0.90, 0.1, 0.1]);
+        assert_eq!(balanced(&b), Decision::Dispatch(Provider::ClaudeCode));
+        // Then only agy is eligible.
+        repoll(&b, &clock, &readings, [0.1, 0.90, 0.90]);
+        assert_eq!(balanced(&b), Decision::Dispatch(Provider::Antigravity));
+        // Below the soft cap it is sticky.
+        repoll(&b, &clock, &readings, [0.77, 0.50, 0.90]);
+        assert_eq!(balanced(&b), Decision::Dispatch(Provider::Antigravity));
+        // Past it, work moves to the provider below it.
+        repoll(&b, &clock, &readings, [0.79, 0.50, 0.90]);
+        assert_eq!(balanced(&b), Decision::Dispatch(Provider::ClaudeCode));
+    }
 
-        set(&readings, 0.77, 0.5, 0.5);
-        clock.advance(Duration::from_secs(180));
-        b.poll_due();
-        for _ in 0..10 {
-            assert_eq!(balanced(), Decision::Dispatch(Provider::Antigravity));
-        }
-
-        // Past the soft cap but under the hard cap, with others available.
-        set(&readings, 0.80, 0.5, 0.5);
-        clock.advance(Duration::from_secs(180));
-        b.poll_due();
+    #[test]
+    fn balanced_failover_skips_other_providers_past_soft_cap() {
+        let (b, clock, readings, _) = rig(None);
+        b.set_orchestration_active(true);
+        repoll(&b, &clock, &readings, [0.1, 0.90, 0.90]);
+        assert_eq!(balanced(&b), Decision::Dispatch(Provider::Antigravity));
         for _ in 0..20 {
-            assert_ne!(balanced(), Decision::Dispatch(Provider::Antigravity));
+            repoll(&b, &clock, &readings, [0.79, 0.84, 0.5]);
+            b.state.lock().unwrap().current = Some(Provider::Antigravity);
+            assert_eq!(balanced(&b), Decision::Dispatch(Provider::Codex));
         }
     }
 
     #[test]
-    fn balanced_keeps_past_soft_provider_when_it_is_the_only_one() {
-        let (b, clock, readings, _) = rig(None);
-        set(&readings, 0.1, 0.9, 0.9);
-        b.set_orchestration_active(true);
-        b.poll_due();
-        let balanced = || b.decide(ProviderQuotaPolicy::BalancedFailover, Provider::Codex);
-        assert_eq!(balanced(), Decision::Dispatch(Provider::Antigravity));
-        set(&readings, 0.80, 0.9, 0.9);
-        clock.advance(Duration::from_secs(180));
-        b.poll_due();
-        assert_eq!(balanced(), Decision::Dispatch(Provider::Antigravity));
+    fn balanced_stays_put_when_every_provider_with_room_is_past_soft_cap() {
+        for claude in [0.84, 0.849, 0.78] {
+            let (b, clock, readings, _) = rig(None);
+            b.set_orchestration_active(true);
+            repoll(&b, &clock, &readings, [0.1, 0.90, 0.90]);
+            assert_eq!(balanced(&b), Decision::Dispatch(Provider::Antigravity));
+            repoll(&b, &clock, &readings, [0.79, claude, 0.90]);
+            for _ in 0..50 {
+                assert_eq!(balanced(&b), Decision::Dispatch(Provider::Antigravity));
+            }
+            // It moves, and stays, once the current provider has no room.
+            repoll(&b, &clock, &readings, [0.86, claude, 0.90]);
+            assert_eq!(balanced(&b), Decision::Dispatch(Provider::ClaudeCode));
+            repoll(&b, &clock, &readings, [0.79, claude, 0.90]);
+            for _ in 0..50 {
+                assert_eq!(balanced(&b), Decision::Dispatch(Provider::ClaudeCode));
+            }
+        }
     }
 
     #[test]
