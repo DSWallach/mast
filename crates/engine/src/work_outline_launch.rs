@@ -798,6 +798,11 @@ impl WorkItemLaunchService {
     /// chat's own execution root, under the same work item and parent. The
     /// launch is idempotent per `operation_id`, so a retry or a restart
     /// returns the chat the first call made.
+    ///
+    /// A successor on the stalled chat's own harness (`harness` equals its
+    /// configured one) keeps its model, reasoning level and model options, the
+    /// context window among them. On another harness those mean nothing, so the
+    /// launch picks that harness's defaults.
     pub(crate) async fn create_credit_successor(
         &self, stalled: &str, operation_id: &str, harness: mast_proto::HarnessId, prompt: String,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
@@ -808,10 +813,12 @@ impl WorkItemLaunchService {
             .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "The stalled chat has no work item"))?;
         let mut config = self.workspace.chat_config(stalled)
             .ok_or_else(|| error(WorkOutlineErrorCode::NotFound, "The stalled chat has no configuration"))?;
-        config.harness = harness;
-        config.model = None;
-        config.reasoning = None;
-        config.model_options.clear();
+        if config.harness != harness {
+            config.harness = harness;
+            config.model = None;
+            config.reasoning = None;
+            config.model_options.clear();
+        }
         let request = CreateChatForWorkItemParams {
             work_item_id,
             initial_prompt: WorkItemPrompt { text: prompt, attachments: Vec::new() },
@@ -2953,5 +2960,120 @@ mod default_model_tests {
         // Nothing stored, or a blank model, reuses nothing.
         assert_eq!(reused(HarnessId::ClaudeCode, stored(HarnessId::ClaudeCode, None)), None);
         assert_eq!(reused(HarnessId::ClaudeCode, stored(HarnessId::ClaudeCode, Some("  "))), None);
+    }
+}
+
+#[cfg(test)]
+mod credit_successor_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use futures::stream::BoxStream;
+    use mast_harness::{Harness, HarnessError, RunControls};
+    use mast_proto::{AgentEvent, DEFAULT_WORKER_CLAUDE_MODEL, DoneStatus, HarnessId, Model, ReasoningLevel};
+    use serde_json::json;
+
+    use super::*;
+    use crate::{EngineCore, HarnessRegistry};
+
+    /// A harness whose every turn completes at once.
+    struct Idle(HarnessId);
+
+    #[async_trait]
+    impl Harness for Idle {
+        fn id(&self) -> HarnessId { self.0 }
+        fn display_name(&self) -> &str { "Idle" }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] { &[ReasoningLevel::Medium, ReasoningLevel::High] }
+        fn deterministic_turn_end(&self) -> bool { true }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> { Ok(Vec::new()) }
+
+        async fn run(
+            &self, _request: RunRequest, _controls: RunControls,
+        ) -> Result<BoxStream<'static, AgentEvent>, HarnessError> {
+            let done = AgentEvent::Done {
+                status: DoneStatus::Completed, session_id: None, result: None, errors: vec![], error_code: None,
+            };
+            Ok(futures::stream::iter([done]).boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_successor_keeps_the_model_settings_only_on_the_same_harness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let (repo, data) = (root.join("repo"), root.join("data"));
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("device-id"), "dev-a").unwrap();
+        let registry = HarnessRegistry::new();
+        for id in [HarnessId::ClaudeCode, HarnessId::Codex] {
+            registry.register(Arc::new(Idle(id)));
+        }
+        let core = EngineCore::assemble(&data, Arc::new(registry), HarnessId::ClaudeCode, None).unwrap();
+        let client = mast_rpc::memory_client(core.rpc_service());
+        for params in [
+            json!({"op":"createSpace","spaceId":"space-1","deviceId":"dev-a","path":repo}),
+            json!({"op":"createChat","chatId":"manager","spaceId":"space-1","deviceId":"dev-a"}),
+        ] {
+            client.call(mast_rpc::methods::MUTATE, params).await.unwrap();
+        }
+        client.call(mast_rpc::methods::WORK_OUTLINE_MUTATE,
+            json!({"op":"createWorkItem","spaceId":"space-1","title":"w","operationId":"item-w"})).await.unwrap();
+
+        // Neither harness's default model, level or options.
+        let options = [("contextWindow".to_owned(), json!("400000")), ("fastMode".to_owned(), json!(true))];
+        let stalled_config = ChatConfig {
+            approval_rules: false,
+            harness: HarnessId::ClaudeCode,
+            model: Some("claude-opus-5-5".into()),
+            reasoning: Some(ReasoningLevel::High),
+            model_options: options.into_iter().collect(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+        };
+        let launch = &core.work_item_launch;
+        let stalled = launch.create_chat_for_work_item(&CreateChatForWorkItemParams {
+            work_item_id: derive_id("item-w", roles::ITEM),
+            initial_prompt: WorkItemPrompt { text: "do the task".into(), attachments: Vec::new() },
+            config: Some(stalled_config.clone()),
+            execution_override: None,
+            worktree_choice: None,
+            operation_id: "launch-w".into(),
+            parent_chat_id: Some("manager".into()),
+            target_device_id: None,
+            account_id: None,
+            standing_role: None,
+        }).await.unwrap().chat_id;
+        let stalled_config = core.workspace.chat_config(&stalled).unwrap();
+
+        let same = launch.create_credit_successor(&stalled, "successor-same", HarnessId::ClaudeCode, "go on".into())
+            .await.unwrap().chat_id;
+        let kept = core.workspace.chat_config(&same).unwrap();
+        assert_ne!(same, stalled);
+        assert_eq!(kept.harness, HarnessId::ClaudeCode);
+        assert_eq!(kept.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(kept.reasoning, Some(ReasoningLevel::High));
+        assert_eq!(kept.model_options, stalled_config.model_options);
+        assert_eq!(kept.model_options.get("contextWindow"), Some(&json!("400000")));
+
+        // A retry of the same operation returns the same chat.
+        let again = launch.create_credit_successor(&stalled, "successor-same", HarnessId::ClaudeCode, "go on".into())
+            .await.unwrap().chat_id;
+        assert_eq!(again, same);
+
+        // Back to Claude from a Codex chat: nothing of Codex's settings carries.
+        let mut codex = stalled_config.clone();
+        codex.harness = HarnessId::Codex;
+        codex.model = Some("gpt-5".into());
+        core.workspace.set_chat_config(&stalled, &codex).unwrap();
+        let cross = launch.create_credit_successor(&stalled, "successor-cross", HarnessId::ClaudeCode, "go on".into())
+            .await.unwrap().chat_id;
+        let fresh = core.workspace.chat_config(&cross).unwrap();
+        assert_eq!(fresh.harness, HarnessId::ClaudeCode);
+        assert_eq!(fresh.model.as_deref(), Some(DEFAULT_WORKER_CLAUDE_MODEL));
+        assert_eq!(fresh.reasoning, None);
+        assert!(fresh.model_options.is_empty(), "{:?}", fresh.model_options);
+        core.shutdown().await;
     }
 }
