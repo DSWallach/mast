@@ -152,8 +152,8 @@ pub struct CapEditor {
 impl CapEditor {
     pub fn new(saved: QuotaSettings) -> Self {
         Self {
+            draft: saved.clone(),
             saved,
-            draft: saved,
         }
     }
 
@@ -920,7 +920,7 @@ mod tests {
     #[test]
     fn out_of_range_saved_caps_show_and_do_not_block_a_mode_change() {
         for saved in [record(0.2, 0.4, 0.9), record(0.5, 0.97, 0.99)] {
-            let mut editor = CapEditor::new(saved);
+            let mut editor = CapEditor::new(saved.clone());
             assert_eq!(editor.error(), None);
             editor.draft.policy = ProviderQuotaPolicy::PinnedFreeze;
             assert!(editor.can_save());
@@ -951,7 +951,7 @@ mod tests {
     fn unedited_fractional_caps_are_not_rounded() {
         // Both round to 78%, yet they are validly ordered.
         let saved = record(0.781, 0.784, 0.9);
-        let mut editor = CapEditor::new(saved);
+        let mut editor = CapEditor::new(saved.clone());
         assert_eq!(editor.error(), None);
         editor.draft.policy = ProviderQuotaPolicy::PinnedFreeze;
         assert!(editor.can_save());

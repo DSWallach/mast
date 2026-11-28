@@ -388,7 +388,7 @@ fn nothing_running_has_the_footer_only() {
 fn usage_loads_then_unavailable_accounts_say_so() {
     let loading = texts(&menu(&snapshot(&[]), None, None));
     assert!(loading.iter().any(|l| l == "Usage") && loading.iter().any(|l| l == "Loading\u{2026}"));
-    let empty = [UsageAccount { name: "Default \u{b7} Codex".into(), windows: vec![], note: None }];
+    let empty = [UsageAccount { name: "Default \u{b7} Codex".into(), windows: vec![], note: None, hard_cap: None }];
     let lines = texts(&menu(&snapshot(&[]), Some(&empty), None));
     assert!(lines.iter().any(|l| l == "usage unavailable \u{2014} no usage data"));
 }
@@ -516,7 +516,7 @@ fn bars_glyph(bars: GlyphBars) -> Glyph {
 fn one_mini_bar_per_account_with_a_session_window_up_to_four() {
     let usage = [
         account("a", 0.62, 0.4),
-        UsageAccount { name: "no windows".into(), windows: vec![], note: None },
+        UsageAccount { name: "no windows".into(), windows: vec![], note: None, hard_cap: None },
         account("b", 0.91, 0.7),
         account("c", 0.18, 0.5),
     ];
