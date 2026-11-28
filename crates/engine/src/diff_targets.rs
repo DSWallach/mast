@@ -306,6 +306,13 @@ impl DiffTargets {
                         Some(existing) => {
                             existing.repo_id = repo_id.clone();
                             existing.worktree_id = worktree_id.clone();
+                            // The agent's latest bind is the one it works in,
+                            // whoever added the target. A manual pick only
+                            // selects: it never takes that away.
+                            if source == ChatDiffTargetSource::Agent {
+                                existing.source = source;
+                                existing.bound_at = crate::now_ms();
+                            }
                         }
                         None => {
                             if row.targets.len() >= MAX_CHAT_DIFF_TARGETS {

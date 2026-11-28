@@ -354,6 +354,60 @@ async fn selection_follows_the_latest_bind_clear_and_unbind() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_agent_rebind_takes_over_a_target_and_a_manual_pick_does_not() {
+    let f = fixture();
+    let manual = |path: &Path| {
+        f.targets.bind("chat-1", &text(path), ChatDiffTargetSource::Manual, None).unwrap();
+    };
+    let agent = |path: &Path| {
+        f.targets.bind("chat-1", &text(path), ChatDiffTargetSource::Agent, None).unwrap();
+    };
+    let stored = |path: &Path| {
+        let row = f.core.workspace.chat_diff_targets("chat-1").unwrap().unwrap();
+        let target = row.targets.iter().find(|t| t.path == text(path)).unwrap().clone();
+        (target, row.selected)
+    };
+    // So that two binds never share a millisecond.
+    let tick = || std::thread::sleep(std::time::Duration::from_millis(5));
+
+    manual(&f.sub_wt);
+    let (picked, _) = stored(&f.sub_wt);
+    assert_eq!(picked.source, ChatDiffTargetSource::Manual);
+    tick();
+    agent(&f.root_wt);
+    let (first, _) = stored(&f.root_wt);
+    assert_eq!(first.source, ChatDiffTargetSource::Agent);
+    assert!(first.bound_at > picked.bound_at);
+
+    // The user picking again only changes the selection.
+    tick();
+    manual(&f.sub_wt);
+    let (repicked, selected) = stored(&f.sub_wt);
+    assert_eq!(repicked, picked);
+    assert_eq!(selected, Some(text(&f.sub_wt)));
+
+    // The agent binding the user's pick makes it the agent's latest.
+    tick();
+    agent(&f.sub_wt);
+    let (taken, selected) = stored(&f.sub_wt);
+    assert_eq!(taken.source, ChatDiffTargetSource::Agent);
+    assert!(taken.bound_at > first.bound_at);
+    assert_eq!(selected, Some(text(&f.sub_wt)));
+
+    // Going back to an earlier one moves it to the front again.
+    tick();
+    agent(&f.root_wt);
+    let (back, _) = stored(&f.root_wt);
+    assert!(back.bound_at > taken.bound_at);
+    assert_eq!(f.core.workspace.chat_diff_targets("chat-1").unwrap().unwrap().targets.len(), 2);
+
+    // A manual pick of an agent target keeps its source and time.
+    tick();
+    manual(&f.sub_wt);
+    assert_eq!(stored(&f.sub_wt).0, taken);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn retries_with_the_same_operation_id_write_nothing() {
     let f = fixture();
     let first = bind(&f, &f.sub_wt, "op-1");
@@ -390,7 +444,11 @@ async fn retries_with_the_same_operation_id_write_nothing() {
         .unwrap()
         .unwrap();
     assert_eq!(row.ops, vec!["op-1".to_string(), "op-2".to_string()]);
-    assert_eq!(row.targets, row_before.targets);
+    // Only the time of the agent's latest bind moves.
+    let mut targets = row.targets.clone();
+    assert!(targets[0].bound_at >= row_before.targets[0].bound_at);
+    targets[0].bound_at = row_before.targets[0].bound_at;
+    assert_eq!(targets, row_before.targets);
 
     // An operation id cannot be reused for another path.
     let conflict = f.targets.bind(
