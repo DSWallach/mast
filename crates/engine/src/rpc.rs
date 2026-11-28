@@ -3597,8 +3597,15 @@ impl RpcService for EngineRpc {
                 // attributable when the per-run token itself is still valid.
                 let grant = service.tokens().authenticate(&p.token).ok();
                 let tool = p.tool.clone();
+                // The role gate comes first: several tools below never reach `service.call`.
+                let (gate, gated) = (service.clone(), p.clone());
+                let allowed = tokio::task::spawn_blocking(move || gate.authorize_role(&gated))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let result: Result<serde_json::Value, RpcError> =
-                    if p.tool == mast_proto::mast_management::TOOL {
+                    if let Err(refused) = allowed {
+                        Err(RpcError::Failed(refused.to_wire_message()))
+                    } else if p.tool == mast_proto::mast_management::TOOL {
                         self.assistant_manage(&p).await
                     } else if p.tool == mast_proto::agent_tools::tools::QUOTA_STATUS {
                         self.quota_status(&p).await

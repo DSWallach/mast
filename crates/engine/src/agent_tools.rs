@@ -1560,16 +1560,7 @@ impl AgentToolsService {
     /// the tool's expected parameters and an example call.
     pub fn call(&self, params: &AgentToolCallParams) -> Result<Value, AgentToolError> {
         let context = self.context(&params.token)?;
-        let role = self.catalog_role(&context);
-        let listed: Option<&[&str]> = match role {
-            Some(mast_proto::AgentRoleProfile::Worker) => Some(&mast_proto::context_slice::WORKER_TOOL_NAMES),
-            Some(mast_proto::AgentRoleProfile::Verifier) => Some(&mast_proto::context_slice::VERIFIER_TOOL_NAMES),
-            _ => None,
-        };
-        let tool = params.tool.as_str();
-        if listed.is_some_and(|names| !names.contains(&tool) && !mast_proto::context_slice::INTERNAL_TOOL_CALLS.contains(&tool)) {
-            return Err(AgentToolError::refused(AgentToolErrorCode::Forbidden, "tool is not available to this role"));
-        }
+        self.require_listed_tool(&context, &params.tool)?;
         let arguments = agent_tools::normalize_arguments(&params.tool, &params.arguments);
         // Reminder tracking is disabled along with the watcher. In particular,
         // ordinary tool calls must not retain per-chat state indefinitely.
@@ -1582,6 +1573,27 @@ impl AgentToolsService {
                 } => AgentToolError::invalid(agent_tools::with_usage(&params.tool, &message)),
                 other => other,
             })
+    }
+
+    /// The role gate for an `AgentToolCall`. The RPC surface runs it before it dispatches any
+    /// tool itself, and [`Self::call`] runs it again for its direct callers.
+    pub(crate) fn authorize_role(&self, params: &AgentToolCallParams) -> Result<(), AgentToolError> {
+        let context = self.context(&params.token)?;
+        self.require_listed_tool(&context, &params.tool)
+    }
+
+    /// A Worker or Verifier may call the tools on its role's list, and `mast-mcp`'s own
+    /// internal calls.
+    fn require_listed_tool(&self, context: &CallContext, tool: &str) -> Result<(), AgentToolError> {
+        let listed: &[&str] = match self.catalog_role(context) {
+            Some(mast_proto::AgentRoleProfile::Worker) => &mast_proto::context_slice::WORKER_TOOL_NAMES,
+            Some(mast_proto::AgentRoleProfile::Verifier) => &mast_proto::context_slice::VERIFIER_TOOL_NAMES,
+            _ => return Ok(()),
+        };
+        if listed.contains(&tool) || mast_proto::context_slice::INTERNAL_TOOL_CALLS.contains(&tool) {
+            return Ok(());
+        }
+        Err(AgentToolError::refused(AgentToolErrorCode::Forbidden, "tool is not available to this role"))
     }
 
     pub(crate) fn authorize_quota_status(
@@ -1858,6 +1870,12 @@ impl AgentToolsService {
         };
         let queued = jobs.enqueue(new).map_err(|e| AgentToolError::invalid(e.to_string()))?;
         let job = queued.job;
+        // This chat cancelled its part of a shared job: it can no longer read it, so say that
+        // instead of handing back a job that every other build tool would refuse.
+        if queued.replay && !jobs.is_waiter(&job.id, &context.grant.chat_id).map_err(|e| AgentToolError::invalid(e.to_string()))? {
+            return Ok(json!({"jobId":job.id,"detached":true,"replay":true,
+                "message":"this chat left this shared build with build_cancel; use a new idempotencyKey to build again"}));
+        }
         let mut approval = None;
         if job.state == crate::build_jobs::JobState::AwaitingApproval {
             approval = match self.raise_build_approval(context, &job) {

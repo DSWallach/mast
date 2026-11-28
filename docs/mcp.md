@@ -137,7 +137,7 @@ A project Manager can reach chats in its managed project, including archived cha
 
 ### Build queue: `build_*`
 
-Six compact tools queue and follow builds on the shared build queue (`build_jobs`), so a chat does not run Cargo itself. Each schema is under 600 bytes. Workers and coordinator chats see all six. A Verifier sees only `build_list`, `build_status` and `build_log`, and cannot start, wait for or cancel a build. The queue must be configured on the engine, otherwise every call fails with "build queue is unavailable: <reason>" (not configured, disabled, or what is wrong with the profile).
+Six compact tools queue and follow builds on the shared build queue (`build_jobs`), so a chat does not run Cargo itself. Each schema is under 600 bytes. Workers and coordinator chats see all six. A Verifier sees only `build_list`, `build_status` and `build_log`, and cannot start, wait for or cancel a build; what it can read is [limited by how roles are assigned](#role-scoped-catalog-and-quota_status). The queue must be configured on the engine, otherwise every call fails with "build queue is unavailable: <reason>" (not configured, disabled, or what is wrong with the profile).
 
 | Tool | Purpose | Scoping |
 |---|---|---|
@@ -146,11 +146,11 @@ Six compact tools queue and follow builds on the shared build queue (`build_jobs
 | `build_list {activeOnly?, limit?}` | Jobs, newest first (default 50, at most 100). | The chat's own jobs in its Space. A Verifier also sees those of chats on its own work item. |
 | `build_wait {jobId}` | Register the completion wake and return at once; end the turn and the engine wakes the chat. | Attached chats only. |
 | `build_log {jobId, offset?, maxBytes?}` | A byte window of the job log (default 8 KiB, at most 64 KiB) and `nextOffset`. | As `build_status`. |
-| `build_cancel {jobId}` | Cancel a queued or running job. | Attached chats only. A chat that shares another chat's job only leaves it (`detached: true`) and the job carries on; the owner, or the last chat waiting, cancels it. |
+| `build_cancel {jobId}` | Cancel a queued or running job. | Attached chats only. A chat that shares another chat's job only leaves it (`detached: true`) and the job carries on; the owner, or the last chat waiting, cancels it. After leaving, a `build_enqueue` retry with the old key answers `{jobId, detached: true}`; use a new key to build again. |
 
 Identical queued builds coalesce into one job only within a Space.
 
-**Commands.** `argv` is run directly: no shell, no pipes or redirection. Only `cargo test|build|check|clippy`, `cargo nextest run|list`, `scripts/ui-preview.sh` and `scripts/ui-flow.sh` are accepted. A Space rule matches a command prefix, so Cargo flags come from a fixed list (package, target-selection, feature, profile and output flags, plus test-runner flags). `--config`, `--target-dir`, `-Z`, `-C` and any flag not on the list are refused. `--target` must be a triple, not a spec file, and `--manifest-path` must be a relative path that stays inside `cwd`. After `--`, `build` and `check` take nothing, `clippy` takes only lint levels (`-D`, `-W`, `-A`, `-F`), and test arguments are free. Arguments containing control, bidirectional or invisible characters, Markdown link or comment syntax, or an artifact id are refused. `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` belong to the slot. These limits bound what a rule admits; they do not sandbox the build, which runs the tree's own build scripts and tests.
+**Commands.** `argv` is run directly: no shell, no pipes or redirection. Only `cargo test|build|check|clippy`, `cargo nextest run|list`, `scripts/ui-preview.sh` and `scripts/ui-flow.sh` are accepted. A Space rule matches a command prefix, so Cargo flags come from a fixed list (package, target-selection, feature, profile and output flags, plus test-runner flags). `--config`, `--target-dir`, `-Z`, `-C` and any flag not on the list are refused. `--target` must be a triple, not a spec file, and `--manifest-path` must be a relative path that stays inside `cwd`. Symbolic links are checked only in the local `cwd` as it is at enqueue time; a remote build does not check them at `headSha`, so a link committed there can lead its manifest outside the slot checkout. After `--`, `build` and `check` take nothing, `clippy` takes only lint levels (`-D`, `-W`, `-A`, `-F`), and test arguments are free. Arguments containing control, bidirectional or invisible characters, Markdown link or comment syntax, or an artifact id are refused. `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` belong to the slot. These limits bound what a rule admits; they do not sandbox the build, which runs the tree's own build scripts and tests.
 
 **What a remote build builds.** A remote host accepts only `cargo` commands and builds a commit: `headSha` defaults to the commit checked out in `cwd`, uncommitted changes are not built, and the commit must already be on the host. Rules are matched against the local `cwd`, but the remote build runs at the root of the slot checkout, at whatever `headSha` the call names (not necessarily the one checked out in `cwd`). A rule scoped to a directory therefore does not limit which commit or directory the host builds; relative paths such as `--manifest-path` start at that root.
 
@@ -192,13 +192,28 @@ The tool catalog a chat sees depends on its live role. A Worker sees a short lis
 publishing, `review_publish`, friction, the `build_*` tools, `run_command`,
 `command_status`, `await_background`). A Verifier (a reviewer or spec auditor)
 sees a read-and-review list: chat and plan reads, `report_to_parent`,
-`review_get`, `review_publish`, friction, `bind_chat_worktree`, `run_command`,
+`review_get`, `review_publish`, friction, `bind_chat_worktree`,
 `command_status`, `await_background`, and `build_list`, `build_status` and
-`build_log` for its own work item. Deliberately, it cannot start or message
-chats, start builds, publish artifacts, raise user action requests or change the
-Work Outline. The engine enforces both lists on every call; the calls `mast-mcp`
-makes on its own while serving a listed tool are exempt, and each authorizes
-itself. A Manager or Lead sees the full catalog except the
+`build_log`. Deliberately, it cannot start commands (`run_command`) or builds,
+start or message chats, publish artifacts, raise user action requests or change
+the Work Outline.
+
+Current limit: a chat's role comes from the single `taskSpec` of the work item it
+is assigned to, and a Verifier reads builds only for chats on that same item. A
+reviewer that review dispatch starts on a Worker's item therefore has the Worker
+role (and sees only its own builds), while a Verifier on a separate reviewer item
+sees none of the Worker item's builds. Reading a Worker's builds from a
+dispatched review needs per-chat roles, which do not exist yet.
+
+The engine applies both lists to every `AgentToolCall`, including the tools its
+RPC surface dispatches itself; only the calls `mast-mcp` makes on its own while
+serving a listed tool (`chat_project_scope_chats`, `chat_archive_info`,
+`final_handback`) pass, and each authorizes itself. Tools that `mast-mcp` carries
+out with other engine RPCs, such as `send_message`, `wait_for_turn` or
+`interrupt_chat`, are held to a role only by `mast-mcp`'s catalog. `mast
+agent-tool` calls that dispatcher without the catalog filter, so for those tools
+the role lists do not apply to it; `mast-mcp`'s own reach rules still do. A
+Manager or Lead sees the full catalog except the
 user-only `mast_manage` and `admin` tools and the workflow-pack tools; a chat
 with no role sees the ordinary catalog. The role is re-read from the engine on
 each listing, so a hand-off or an archived scope changes what a chat sees without

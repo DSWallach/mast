@@ -11891,8 +11891,11 @@ async fn a_verifier_reads_the_builds_of_its_own_work_item_only() {
     let owner = build_token(&rig, CHAT);
     let queued = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "v", "argv": ["cargo", "check"] })).await.unwrap();
     let job = queued["job"]["jobId"].as_str().unwrap().to_owned();
+    // This covers the scope rule only, not a dispatched review: a role comes from the item's one
+    // taskSpec, so the test turns the builder's item into a reviewer item after the build. A
+    // reviewer dispatched onto a Worker's item is itself a Worker.
     update_item(&rig, "review-spec", &item, json!({ "taskSpec": { "requiredReport": true, "taskClass": { "role": "reviewer" } } })).await.unwrap();
-    // A reviewer is a child chat on the reviewed item; one on another item sees nothing.
+    // A Verifier is a child chat; one on another item sees nothing.
     let config = command_config(false, false, SandboxLevel::WorkspaceWrite);
     let elsewhere = create_item(&rig, "elsewhere", "Elsewhere", None).await;
     update_item(&rig, "elsewhere-spec", &elsewhere, json!({ "taskSpec": { "requiredReport": true, "taskClass": { "role": "reviewer" } } })).await.unwrap();
@@ -11909,7 +11912,7 @@ async fn a_verifier_reads_the_builds_of_its_own_work_item_only() {
     let ids = |reply: Value| reply["jobs"].as_array().unwrap().iter().map(|j| j["jobId"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
     assert_eq!(ids(tool(&rig, here.token(), "build_list", json!({})).await.unwrap()), vec![job.clone()]);
     assert!(ids(tool(&rig, there.token(), "build_list", json!({})).await.unwrap()).is_empty());
-    for name in ["build_enqueue", "build_cancel", "build_wait"] {
+    for name in ["build_enqueue", "build_cancel", "build_wait", "run_command"] {
         let refused = tool(&rig, here.token(), name, json!({ "jobId": job })).await.unwrap_err();
         assert!(refused.contains("not available to this role"), "{name}: {refused}");
     }
@@ -11935,4 +11938,35 @@ async fn a_retry_after_a_new_commit_replays_the_first_build() {
     assert_eq!((&again["job"]["jobId"], &again["job"]["headSha"], again["replay"].as_bool()),
         (&first["job"]["jobId"], &first["job"]["headSha"], Some(true)));
     rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replay_after_leaving_a_shared_build_says_the_chat_is_detached() {
+    let (rig, jobs, _) = build_rig().await;
+    let item = create_item(&rig, "other-item", "Other", None).await;
+    assign_chat(&rig, "other-assign", OTHER_CHAT, &item).await;
+    let rule = mast_proto::work_outline::ApprovalRule {
+        id: "rule-shared".into(), label: "Checks".into(), created_by: "user".into(),
+        harness: mast_proto::work_outline::ApprovalRuleHarness::Any, enabled: true,
+        argv_prefix: vec!["cargo".into(), "check".into()], command_regex: None, cwd_scope: None,
+        require_isolated_home: false, constraints: None, hit_count: 0, last_used_at: None,
+    };
+    rig.core.workspace.work_outline_mutate(&mast_proto::work_outline::WorkOutlineMutation::SetApprovalRule(
+        mast_proto::work_outline::SetApprovalRuleParams { space_id: SPACE.into(), rule, operation_id: "rule".into(), edit_environment: false }),
+        &user_actor(&rig), &[]).unwrap();
+    let (owner, other) = (build_token(&rig, CHAT), build_token(&rig, OTHER_CHAT));
+    let args = json!({ "idempotencyKey": "shared", "argv": ["cargo", "check"] });
+    let first = tool(&rig, owner.token(), "build_enqueue", args.clone()).await.unwrap();
+    let joined = tool(&rig, other.token(), "build_enqueue", args.clone()).await.unwrap();
+    assert_eq!(joined["coalesced"], true, "{joined}");
+    let left = tool(&rig, other.token(), "build_cancel", json!({ "jobId": first["job"]["jobId"] })).await.unwrap();
+    assert_eq!((left["detached"].as_bool(), left["job"]["state"].as_str()), (Some(true), Some("queued")));
+    let replay = tool(&rig, other.token(), "build_enqueue", args.clone()).await.unwrap();
+    assert_eq!((replay["detached"].as_bool(), &replay["jobId"], replay.get("job")),
+        (Some(true), &first["job"]["jobId"], None), "{replay}");
+    assert!(!jobs.is_waiter(first["job"]["jobId"].as_str().unwrap(), OTHER_CHAT).unwrap());
+    // The owner's replay is unchanged, and a new key joins the queued job again.
+    assert_eq!(tool(&rig, owner.token(), "build_enqueue", args).await.unwrap()["job"]["jobId"], first["job"]["jobId"]);
+    let again = tool(&rig, other.token(), "build_enqueue", json!({ "idempotencyKey": "shared-2", "argv": ["cargo", "check"] })).await.unwrap();
+    assert_eq!(again["coalesced"], true, "{again}");
 }

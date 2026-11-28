@@ -687,7 +687,7 @@ async fn workers_and_verifiers_keep_the_reach_mcp_resolves_through_internal_call
         (lease, tools)
     };
     let (worker_lease, worker) = agent(&successor);
-    let (_reviewer_lease, reviewer) = agent("chat-reviewer");
+    let (reviewer_lease, reviewer) = agent("chat-reviewer");
 
     // Both are really held to their role lists.
     for tools in [&worker, &reviewer] {
@@ -704,17 +704,41 @@ async fn workers_and_verifiers_keep_the_reach_mcp_resolves_through_internal_call
     worker.call("read_chat", json!({ "chat": "chat-predecessor", "limit": 2 })).await
         .expect("a Worker reads its hand-off predecessor");
 
-    // The internal child-turn call (`chat_queue_child_turn`).
-    let operation = mast_proto::agent_tools::operation_id(&successor, "child");
-    let child = derive_id(&operation, roles::CHAT);
-    chat(&child, Some(&successor));
-    let queued = admin
-        .call(mast_proto::agent_tools::TOOL_CALL_METHOD, json!({ "token": worker_lease.token(),
-            "tool": "chat_queue_child_turn",
-            "arguments": { "chatId": child, "idempotencyKey": "child", "prompt": "go" } }))
-        .await
-        .expect("a Worker queues a turn on its own child");
-    assert!(queued["commandId"].is_string(), "{queued}");
+    // The RPC surface dispatches some tools itself; the role gate covers those too, whatever
+    // the MCP catalog would have shown (`mast agent-tool` does not consult it).
+    let chats_before = core.workspace.read_chats().unwrap().len();
+    for token in [worker_lease.token(), reviewer_lease.token()] {
+        for (tool, arguments) in [
+            ("chat_launch_child_for_item", json!({ "idempotencyKey": "launch", "workItemId": task,
+                "prompt": "go", "config": config })),
+            ("hand_off_orchestrator", json!({ "idempotencyKey": "hand", "summary": "take over" })),
+            ("chat_queue_child_turn", json!({ "chatId": "x", "idempotencyKey": "turn", "prompt": "go" })),
+            ("quota_status", json!({})),
+            ("mast_manage", json!({})),
+        ] {
+            let refused = admin
+                .call(mast_proto::agent_tools::TOOL_CALL_METHOD,
+                    json!({ "token": token, "tool": tool, "arguments": arguments }))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(refused.contains("not available to this role"), "{tool}: {refused}");
+        }
+        // `final_handback` is behind the same gate and let through: it fails on its own checks.
+        let handback = admin
+            .call(mast_proto::agent_tools::TOOL_CALL_METHOD, json!({ "token": token,
+                "tool": "final_handback", "arguments": {} }))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!handback.contains("not available to this role"), "{handback}");
+    }
+    // Through the CLI's dispatcher too.
+    for tools in [&worker, &reviewer] {
+        let refused = tools.call("hand_off_orchestrator", json!({ "summary": "take over", "idempotencyKey": "cli" })).await.unwrap_err();
+        assert!(refused.contains("not available to this role"), "{refused}");
+    }
+    assert_eq!(core.workspace.read_chats().unwrap().len(), chats_before, "nothing was started");
 }
 
 #[path = "../../../test_support/isolation.rs"]

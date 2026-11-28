@@ -55,24 +55,28 @@ pub const WORKER_TOOL_NAMES: [&str; 25] = [
     tools::AWAIT_BACKGROUND,
 ];
 
-/// Verifiers (reviewers and auditors) read and review: they publish a review, run permitted
-/// commands to check it, and read the builds of their own work item. They cannot start builds,
-/// start or message chats, or change the Work Outline.
-pub const VERIFIER_TOOL_NAMES: [&str; 18] = [
+/// Verifiers (reviewers and auditors) read and review: they publish a review, follow command
+/// runs and background work, and may read the builds of chats on their own work item. They
+/// cannot start commands or builds, start or message chats, or change the Work Outline.
+///
+/// A chat's role comes from the single `taskSpec` of the item it is assigned to. So a reviewer
+/// that `ReviewDispatcher` starts on a Worker's item is itself a Worker, and a Verifier on
+/// another item sees none of that item's builds. Per-chat roles are a dispatch follow-up.
+pub const VERIFIER_TOOL_NAMES: [&str; 17] = [
     "whoami", "get_chat", "read_chat", "report_to_parent", tools::READ_CURRENT,
     tools::ARTIFACT_GET_PLAN, tools::ARTIFACT_RENDER_CHECK, tools::REVIEW_GET,
     tools::REVIEW_PUBLISH, tools::CONTEXT_READ_SLICE, "build_list", "build_status", "build_log",
-    tools::REPORT_FRICTION, tools::BIND_CHAT_WORKTREE, tools::RUN_COMMAND, tools::COMMAND_STATUS,
+    tools::REPORT_FRICTION, tools::BIND_CHAT_WORKTREE, tools::COMMAND_STATUS,
     tools::AWAIT_BACKGROUND,
 ];
 
-/// Engine calls `mast-mcp` makes on its own while serving a listed tool (`get_chat`,
-/// `read_chat`, `send_message`, `report_to_parent`). They are in no catalog, so the engine's role
-/// gate lets them through; each one authorizes its caller itself.
-pub const INTERNAL_TOOL_CALLS: [&str; 4] = [
+/// Engine calls `mast-mcp` makes on its own while serving a listed tool. They are in no
+/// catalog, so the engine's role gate lets them through; each one authorizes its caller itself.
+/// `get_chat` and `read_chat` resolve reach with the first two; `report_to_parent` with
+/// `finalHandback` is the third, which the RPC surface handles after the same gate.
+pub const INTERNAL_TOOL_CALLS: [&str; 3] = [
     tools::PROJECT_SCOPE_CHATS,
     tools::CHAT_ARCHIVE_INFO,
-    tools::QUEUE_CHILD_CHAT_TURN,
     tools::FINAL_HANDBACK,
 ];
 

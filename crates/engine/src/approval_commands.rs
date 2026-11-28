@@ -22,7 +22,7 @@ pub(crate) struct CommandSegment {
 /// what a person reads differ from what runs.
 pub(crate) fn has_hidden_characters(text: &str) -> bool {
     text.chars().any(|c| c.is_control() || matches!(c,
-        '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
+        '\u{00ad}' | '\u{034f}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
         | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{e0000}'..='\u{e007f}'))
 }
 
@@ -1126,6 +1126,7 @@ mod tests {
             &["cargo", "test", "[x](mast-artifact:abc)"], &["cargo", "test", "[x](https://x)"],
             &["cargo", "test", "mast-artifact:abc"], &["cargo", "test", "<!--hidden-->"],
             &["cargo", "test", "a\u{202e}b"], &["cargo", "test", "a\u{200b}b"], &["cargo", "test", "a\nb"],
+            &["cargo", "test", "a\u{034f}b"], &["cargo", "test", "a\u{3164}b"], &["cargo", "test", "a\u{fe0f}b"],
         ] {
             assert!(check(words).is_err(), "{words:?}");
         }
