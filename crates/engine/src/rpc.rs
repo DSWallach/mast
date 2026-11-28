@@ -2434,6 +2434,12 @@ impl RpcService for EngineRpc {
                     Err(message) => return Err(RpcError::Failed(message)),
                 }
             }
+            methods::GET_REMOTE_PARENT => {
+                let p: ChatParams = parse_params(params)?;
+                let remote = self.orchestrator_wakes.remote_parent(&p.chat_id)
+                    .map(|(peer_id, chat_id)| serde_json::json!({ "peerId": peer_id, "chatId": chat_id }));
+                RpcReply::value(&serde_json::json!({ "remoteParent": remote }))
+            }
             methods::NOTE_CHAT_USER_ACTIVITY => {
                 let p: mast_proto::NoteChatUserActivityParams = parse_params(params)?;
                 self.orchestrator_wakes

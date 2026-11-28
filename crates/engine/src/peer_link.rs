@@ -296,6 +296,8 @@ pub trait RemoteReportSink: Send + Sync {
     /// Queue `text` for the chat's remote parent. `None` means the chat has
     /// none, so the caller keeps its normal path.
     fn report(&self, chat_id: &str, title: Option<&str>, text: &str) -> Option<Result<mast_proto::ReportToParentResult, String>>;
+    /// The paired device and the chat on it that `chat_id`'s reports go to.
+    fn remote_parent_of(&self, _chat_id: &str) -> Option<(String, String)> { None }
 }
 
 impl PairedPeer {
@@ -796,6 +798,10 @@ impl PeerRegistry {
 }
 
 impl RemoteReportSink for PeerRegistry {
+    fn remote_parent_of(&self, chat_id: &str) -> Option<(String, String)> {
+        self.remote_parent(chat_id)
+    }
+
     fn report(&self, chat_id: &str, title: Option<&str>, text: &str) -> Option<Result<mast_proto::ReportToParentResult, String>> {
         self.remote_parent(chat_id)?;
         let (text, truncated) = mast_proto::cap_worker_report(text);

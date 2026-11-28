@@ -961,6 +961,12 @@ impl OrchestratorWakes {
         let _ = self.inner.remote_reports.set(sink);
     }
 
+    /// The paired device and chat `chat_id` reports to when its parent lives
+    /// on that device, if it has one.
+    pub fn remote_parent(&self, chat_id: &str) -> Option<(String, String)> {
+        self.inner.remote_reports.get()?.remote_parent_of(chat_id)
+    }
+
     /// Build the service and start its event-driven watchers.
     pub fn start(
         sessions: SessionsEngine,

@@ -587,6 +587,25 @@ impl Tools {
         result.map_err(|e| e.to_string())
     }
 
+    /// A chat a paired device created here keeps its parent in the peer
+    /// registry, so `parentChatId` is null while its reports still reach that
+    /// parent. Say so on the summary instead of leaving it to read as "no parent".
+    async fn with_remote_parent(&self, mut summary: Value, chat: &Chat) -> Value {
+        if chat.parent_chat_id.is_some() || self.zeron.is_peer() {
+            return summary;
+        }
+        let remote = self.zeron.call(methods::GET_REMOTE_PARENT, json!({ "chatId": chat.id })).await
+            .ok().and_then(|reply| reply.get("remoteParent").cloned()).filter(|v| !v.is_null());
+        if let Some(remote) = remote {
+            summary["remoteParent"] = remote;
+            summary["remoteParentNote"] = json!(
+                "Created by a paired device: parentChatId is null here by design. \
+                 report_to_parent works and reaches the chat in remoteParent on that device."
+            );
+        }
+        summary
+    }
+
     async fn whoami(&self, origin: Option<&AgentOrigin>) -> anyhow::Result<Value> {
         let local_device = self.zeron.local_device_id().await?;
         let engine = self.zeron.engine_info().await.unwrap_or(Value::Null);
@@ -595,7 +614,8 @@ impl Tools {
                 Ok(chat) => {
                     let (spaces, sessions) =
                         tokio::try_join!(self.zeron.spaces(), self.zeron.sessions())?;
-                    summarize_chat(&chat, &spaces, &sessions)
+                    let summary = summarize_chat(&chat, &spaces, &sessions);
+                    self.with_remote_parent(summary, &chat).await
                 }
                 Err(_) => json!({ "id": origin.chat_id }),
             },
@@ -628,6 +648,9 @@ impl Tools {
             },
             "note": if origin.is_some() {
                 "Messages you send are attributed to this chat; it cannot message itself. \
+                 A chat a paired device created here shows parentChatId null and a \
+                 remoteParent instead: report_to_parent still works and reaches that \
+                 chat on the device. \
                  You can reach only the chats you created (plus read this one), and \
                  create_chat works only in this chat's Space, never with a wider \
                  sandbox than this chat's. Mutating Work Outline tools and create_chat \
@@ -789,6 +812,7 @@ impl Tools {
         let info = self.chat_archive_info(origin, &[&chat]).await;
         let mut summary =
             with_archivable(summarize_chat(&chat, &spaces, &sessions), &info, &chat.id);
+        summary = self.with_remote_parent(summary, &chat).await;
         summary["messageCount"] = json!(rendered.len());
         let transcript_input = last_pending_input(&rendered).unwrap_or(Value::Null);
         if self.zeron.is_peer() {

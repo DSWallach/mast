@@ -342,6 +342,43 @@ async fn a_manager_sends_a_branch_runs_a_worker_hears_its_report_and_fetches_its
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_peer_created_coordinator_shows_its_remote_parent_and_hears_its_own_children() {
+    let rig = Rig::start(true).await;
+    let tools = rig.manager_tools();
+    let pushed = rig.push_feature(&tools).await;
+    let coordinator = rig.start_worker(&tools, &pushed).await;
+    let (coordinator_tools, _lease) = rig.worker_tools(&coordinator);
+
+    // On B the coordinator has no parentChatId by design; whoami says where its reports go.
+    let me = coordinator_tools.call("whoami", json!({})).await.unwrap();
+    assert!(me["chat"]["parentChatId"].is_null(), "{me}");
+    assert_eq!(me["chat"]["remoteParent"]["chatId"], MANAGER, "{me}");
+    assert!(me["chat"]["remoteParentNote"].as_str().unwrap().contains("report_to_parent works"), "{me}");
+    let read = coordinator_tools.call("get_chat", json!({ "chat": coordinator })).await.unwrap();
+    assert_eq!(read["remoteParent"]["chatId"], MANAGER, "{read}");
+
+    // Up: its report reaches the laptop parent through the peer link.
+    let up = coordinator_tools.call("report_to_parent", json!({ "text": "STATUS: progress\nRESULT: coordinator reporting up" })).await.unwrap();
+    assert_eq!(up["sent"]["delivery"], "queuedForRemoteParent");
+    assert_eq!(up["parentChatId"], MANAGER);
+    rig.wait_for_manager_update("coordinator reporting up").await;
+
+    // Down: a chat the coordinator starts on B reports to the coordinator, locally.
+    let child = coordinator_tools.call("create_chat", json!({
+        "project": SPACE_B, "harness": "claude-code", "prompt": "child work", "idempotencyKey": "coordinator-child",
+    })).await.unwrap();
+    assert_eq!(child["parentChatId"], coordinator, "{child}");
+    let child_id = child["chatId"].as_str().unwrap().to_owned();
+    let (child_tools, _child_lease) = rig.worker_tools(&child_id);
+    let down = child_tools.call("report_to_parent", json!({ "text": "STATUS: done\nRESULT: child reporting down" })).await.unwrap();
+    assert_eq!(down["parentChatId"], coordinator, "{down}");
+    assert_ne!(down["sent"]["delivery"], "queuedForRemoteParent", "{down}");
+    // The child itself has a local parent, so it shows none of the remote kind.
+    let child_me = child_tools.call("whoami", json!({})).await.unwrap();
+    assert!(child_me["chat"]["remoteParent"].is_null(), "{child_me}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_report_waits_on_the_peer_until_it_is_reachable_again() {
     let mut rig = Rig::start(false).await;
     let tools = rig.manager_tools();

@@ -120,6 +120,10 @@ pub mod methods {
     /// A worker reports to its parent chat through the wake queue. Params
     /// `ReportToParentParams`; replies `ReportToParentResult`.
     pub const REPORT_TO_PARENT: &str = "ReportToParent";
+    /// The parent a paired device named for a chat it created here, which this
+    /// device keeps in its peer registry rather than as a `parentChatId`.
+    /// Params `{chatId}`; replies `{remoteParent: {peerId, chatId} | null}`.
+    pub const GET_REMOTE_PARENT: &str = "GetRemoteParent";
     /// The user is focused / typing / has a draft in this chat. Params
     /// `NoteChatUserActivityParams`. IPC-only.
     pub const NOTE_CHAT_USER_ACTIVITY: &str = "NoteChatUserActivity";
