@@ -1550,6 +1550,75 @@ impl RegistryDoc {
         Ok(chats)
     }
 
+    /// The live chat a hand-off chain leaves `chat_id`'s parent at: the
+    /// recorded parent when it is live, else the first live successor reached
+    /// by following recorded hand-offs through archived chats. A parent that is
+    /// archived without a recorded hand-off stays as it is. `None` when the
+    /// chat has no parent or the chain loops.
+    pub fn live_parent(&self, chat_id: &str) -> Option<String> {
+        let mut parent = self.chat(chat_id).ok().flatten()?.parent_chat_id?;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if !seen.insert(parent.clone()) {
+                return None;
+            }
+            let archived = match self.chat(&parent).ok().flatten() {
+                Some(row) => row.archived,
+                None => return Some(parent),
+            };
+            if !archived {
+                return Some(parent);
+            }
+            match self.hand_off_successor(&parent) {
+                Some(next) => parent = next,
+                None => return Some(parent),
+            }
+        }
+    }
+
+    /// The chat a recorded hand-off made out of `from` (the latest, when a
+    /// retry recorded more than one).
+    fn hand_off_successor(&self, from: &str) -> Option<String> {
+        self.read_chats().ok()?.into_iter()
+            .filter_map(|chat| {
+                let provenance = self.overlay_row(KIND_CHATS, &chat.id)?
+                    .fields.get("orchestratorHandOff")?.clone();
+                (provenance.get("fromChatId").and_then(Value::as_str) == Some(from))
+                    .then(|| (provenance.get("at").and_then(Value::as_i64).unwrap_or_default(), chat.id))
+            })
+            .max()
+            .map(|(_, id)| id)
+    }
+
+    /// Live chats a hand-off from `from` owns: those recorded under `from`
+    /// directly, and those whose recorded parent chain reaches `from` through
+    /// archived hand-off predecessors. Never `except`.
+    fn hand_off_children(&self, from: &str, except: &str) -> Vec<String> {
+        self.read_chats().unwrap_or_default().into_iter()
+            .filter(|chat| !chat.archived && chat.id != except
+                && (chat.parent_chat_id.as_deref() == Some(from)
+                    || self.live_parent(&chat.id).as_deref() == Some(from)))
+            .map(|chat| chat.id)
+            .collect()
+    }
+
+    /// Point every live chat whose parent is an archived hand-off predecessor
+    /// at the chain's live successor. Idempotent; chats whose parent was
+    /// archived without a hand-off are left alone. Returns the chats moved.
+    pub fn repair_stale_parents(&mut self) -> Vec<String> {
+        let stale: Vec<(String, String)> = self.read_chats().unwrap_or_default().into_iter()
+            .filter(|chat| !chat.archived)
+            .filter_map(|chat| {
+                let live = self.live_parent(&chat.id)?;
+                (chat.parent_chat_id.as_deref() != Some(live.as_str())).then_some((chat.id, live))
+            })
+            .collect();
+        for (chat, live) in &stale {
+            self.write(KIND_CHATS, chat, OpKind::Update, fields([("parentChatId", json!(live))]));
+        }
+        stale.into_iter().map(|(chat, _)| chat).collect()
+    }
+
     /// Reparent active direct children and record the hand-off on the destination.
     pub fn hand_off_chat_children(
         &mut self,
@@ -1565,7 +1634,8 @@ impl RegistryDoc {
         // A recorded hand-off replays before any live check: the source may
         // since have been archived by a standing role rotation, and the
         // destination may itself have handed off again (A to B, then B to C).
-        // The saved workers come back and nothing is redone.
+        // The saved workers come back and nothing is redone, except that a
+        // chat made or restored under the source since is moved too.
         if let Some(provenance) = self.overlay_row(KIND_CHATS, to)
             .and_then(|row| row.fields.get("orchestratorHandOff").cloned())
         {
@@ -1574,9 +1644,15 @@ impl RegistryDoc {
             {
                 return Err("destination already has a different hand-off".into());
             }
-            return serde_json::from_value(provenance["workerChatIds"].clone())
+            let saved = serde_json::from_value(provenance["workerChatIds"].clone())
                 .map(|workers| (workers, true))
-                .map_err(|e| format!("invalid hand-off provenance: {e}"));
+                .map_err(|e| format!("invalid hand-off provenance: {e}"))?;
+            if !destination.archived {
+                for late in self.hand_off_children(from, to) {
+                    self.write(KIND_CHATS, &late, OpKind::Update, fields([("parentChatId", json!(to))]));
+                }
+            }
+            return Ok(saved);
         }
         if from == to || source.archived || destination.archived {
             return Err("hand-off requires two distinct, active chats".into());
@@ -1601,9 +1677,7 @@ impl RegistryDoc {
             ancestor = chats.iter().find(|chat| chat.id == id)
                 .and_then(|chat| chat.parent_chat_id.as_deref());
         }
-        let workers: Vec<String> = chats.into_iter()
-            .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(from))
-            .map(|chat| chat.id).collect();
+        let workers = self.hand_off_children(from, to);
         for worker in &workers {
             self.write(KIND_CHATS, worker, OpKind::Update,
                 fields([("parentChatId", json!(to))]));

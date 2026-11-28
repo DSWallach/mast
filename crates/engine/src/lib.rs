@@ -428,6 +428,12 @@ impl EngineCore {
         )?;
         let token_usage_retention=sessions.token_usage().map(|usage|usage.follow_deletions(workspace.clone()));
         doc_host.set_workspace(workspace.clone());
+        // Workers a coordinator hand-off left under an archived predecessor
+        // report to its live successor from here on. Idempotent.
+        let repaired = workspace.repair_stale_parent_chats();
+        if !repaired.is_empty() {
+            tracing::info!(chats = ?repaired, "moved chats off archived hand-off predecessors");
+        }
         doc_host.set_instruction_registry(Arc::new(workspace.clone()));
         // Everything the dispatch gate needs (workspace + repos, so
         // `execution_scope()` exists) is wired BEFORE sessions: wiring

@@ -350,6 +350,95 @@ fn hand_off_chat_children_records_provenance_and_replays() {
     assert_eq!(provenance["at"], 123);
 }
 
+/// Chats `ids` in one Space on `dev-a`, each `(id, parent, archived)`.
+fn chain_doc(chats: &[(&str, Option<&str>, bool)]) -> RegistryDoc {
+    let mut doc = RegistryDoc::new("dev-a");
+    for (id, parent, archived) in chats {
+        let mut row = chat(id, "dev-a");
+        row.space_id = Some("space".into());
+        row.parent_chat_id = parent.map(str::to_owned);
+        row.archived = *archived;
+        doc.upsert_chat(&row).unwrap();
+    }
+    doc
+}
+
+fn parent_of(doc: &RegistryDoc, id: &str) -> Option<String> {
+    doc.chat(id).unwrap().unwrap().parent_chat_id
+}
+
+#[test]
+fn replaying_a_hand_off_moves_a_chat_made_under_the_source_since() {
+    let mut doc = chain_doc(&[("a", None, false), ("b", None, false), ("early", Some("a"), false)]);
+    assert_eq!(doc.hand_off_chat_children("a", "b", "a", 1).unwrap(), (vec!["early".into()], false));
+    doc.set_chat_archived("a", true).unwrap();
+    // A chat made under `a` after the hand-off, and one restored from the archive.
+    let mut late = chat("late", "dev-a");
+    late.space_id = Some("space".into());
+    late.parent_chat_id = Some("a".into());
+    doc.upsert_chat(&late).unwrap();
+    assert_eq!(doc.hand_off_chat_children("a", "b", "a", 2).unwrap(), (vec!["early".into()], true));
+    assert_eq!(parent_of(&doc, "late").as_deref(), Some("b"));
+    // Nothing is redone: a second replay changes nothing and keeps the saved workers.
+    assert_eq!(doc.hand_off_chat_children("a", "b", "a", 3).unwrap(), (vec!["early".into()], true));
+    assert_eq!(parent_of(&doc, "early").as_deref(), Some("b"));
+}
+
+#[test]
+fn live_parent_follows_recorded_hand_offs_through_archived_chats() {
+    let mut doc = chain_doc(&[("a", None, false), ("b", None, false), ("c", None, false), ("w", Some("a"), false)]);
+    doc.hand_off_chat_children("a", "b", "a", 1).unwrap();
+    doc.set_chat_archived("a", true).unwrap();
+    assert_eq!(doc.live_parent("w").as_deref(), Some("b"));
+    doc.hand_off_chat_children("b", "c", "b", 2).unwrap();
+    doc.set_chat_archived("b", true).unwrap();
+    assert_eq!(doc.live_parent("w").as_deref(), Some("c"));
+    // A parent archived without a hand-off is not guessed at.
+    let doc = chain_doc(&[("gone", None, true), ("w", Some("gone"), false)]);
+    assert_eq!(doc.live_parent("w").as_deref(), Some("gone"));
+}
+
+#[test]
+fn a_hand_off_chain_that_loops_has_no_live_parent() {
+    let mut doc = chain_doc(&[("a", None, true), ("b", None, true), ("w", Some("a"), false)]);
+    for (from, to) in [("a", "b"), ("b", "a")] {
+        doc.write(KIND_CHATS, to, OpKind::Update, fields([("orchestratorHandOff", json!({
+            "fromChatId": from, "actorChatId": from, "at": 1, "workerChatIds": [],
+        }))]));
+    }
+    assert_eq!(doc.live_parent("w"), None);
+    assert!(doc.repair_stale_parents().is_empty());
+}
+
+#[test]
+fn a_worker_left_under_an_archived_predecessor_moves_with_the_next_hand_off() {
+    let mut doc = chain_doc(&[("a", None, false), ("b", None, false), ("c", None, false)]);
+    doc.hand_off_chat_children("a", "b", "a", 1).unwrap();
+    doc.set_chat_archived("a", true).unwrap();
+    let mut stale = chat("stale", "dev-a");
+    stale.space_id = Some("space".into());
+    stale.parent_chat_id = Some("a".into());
+    doc.upsert_chat(&stale).unwrap();
+    assert_eq!(doc.hand_off_chat_children("b", "c", "b", 2).unwrap(), (vec!["stale".into()], false));
+    assert_eq!(parent_of(&doc, "stale").as_deref(), Some("c"));
+}
+
+#[test]
+fn the_stale_parent_repair_is_idempotent_and_leaves_other_chats_alone() {
+    let mut doc = chain_doc(&[
+        ("a", None, false), ("b", None, false), ("w", Some("a"), false),
+        ("gone", None, true), ("orphan", Some("gone"), false),
+    ]);
+    doc.hand_off_chat_children("a", "b", "a", 1).unwrap();
+    doc.set_chat_archived("a", true).unwrap();
+    // Made stale after the hand-off, as a restored or late-created worker is.
+    doc.write(KIND_CHATS, "w", OpKind::Update, fields([("parentChatId", json!("a"))]));
+    assert_eq!(doc.repair_stale_parents(), vec!["w".to_string()]);
+    assert_eq!(parent_of(&doc, "w").as_deref(), Some("b"));
+    assert_eq!(parent_of(&doc, "orphan").as_deref(), Some("gone"));
+    assert!(doc.repair_stale_parents().is_empty());
+}
+
 #[test]
 fn hand_off_chat_children_refuses_archived_cross_space_and_child() {
     let mut doc = RegistryDoc::new("dev-a");

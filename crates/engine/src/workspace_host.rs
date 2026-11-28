@@ -885,6 +885,18 @@ impl WorkspaceHost {
         self.mutate(|doc| doc.hand_off_chat_children(from, to, actor, at_ms))
     }
 
+    /// The live chat `chat_id`'s parent resolves to once recorded hand-offs
+    /// are followed through archived chats (`None` without a parent).
+    pub fn live_parent(&self, chat_id: &str) -> Option<String> {
+        self.read(|doc| doc.live_parent(chat_id))
+    }
+
+    /// Point chats left under an archived hand-off predecessor at its live
+    /// successor. Idempotent. Returns the chats moved.
+    pub fn repair_stale_parent_chats(&self) -> Vec<String> {
+        self.mutate(|doc| doc.repair_stale_parents())
+    }
+
     pub fn standing_role(&self, role: mast_proto::StandingRoleKind, scope_item_id: &str) -> Option<mast_proto::StandingRole> {
         self.read(|doc| doc.standing_role(role, scope_item_id))
     }

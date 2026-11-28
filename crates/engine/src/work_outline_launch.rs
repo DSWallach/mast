@@ -868,7 +868,9 @@ impl WorkItemLaunchService {
             ),
         };
         successor.execution_override = Some(ExecutionOverride { configuration });
-        successor.parent_chat_id = source_chat.parent_chat_id;
+        // A source whose parent was handed off since keeps pointing at the
+        // archived predecessor; the successor reports to the live chat.
+        successor.parent_chat_id = self.workspace.live_parent(source).or(source_chat.parent_chat_id);
         let harness = successor
             .config
             .as_ref()
