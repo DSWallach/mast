@@ -326,6 +326,8 @@ pub struct WorkspaceHost {
 
 enum ChatOrigin {
     Parent(String),
+    /// A provisional role chat that also has a parent (tag, parent).
+    ProvisionalUnder(String, String),
     Scheduled(mast_proto::ScheduledChat, Option<String>),
     ArchivedExternal(mast_proto::ScheduledChat),
     /// A standing role's first-start chat: born hidden under this provisional
@@ -1003,13 +1005,30 @@ impl WorkspaceHost {
         cwd: String,
         tag: String,
     ) -> Result<(), EngineError> {
+        self.create_provisional_role_chat_under(chat_id, space_id, config, cwd, tag, None)
+    }
+
+    /// As [`Self::create_provisional_role_chat`], with a parent chat (a Lead's
+    /// parent is its Manager).
+    pub fn create_provisional_role_chat_under(
+        &self,
+        chat_id: &str,
+        space_id: &str,
+        config: Option<ChatConfig>,
+        cwd: String,
+        tag: String,
+        parent: Option<String>,
+    ) -> Result<(), EngineError> {
         self.create_chat_with_origin(
             chat_id,
             Some(space_id),
             None,
             config,
             Some(cwd),
-            Some(ChatOrigin::Provisional(tag)),
+            Some(match parent {
+                Some(parent) => ChatOrigin::ProvisionalUnder(tag, parent),
+                None => ChatOrigin::Provisional(tag),
+            }),
         )
     }
 
@@ -2821,11 +2840,12 @@ impl WorkspaceHost {
         };
         let archived = matches!(&origin, Some(ChatOrigin::ArchivedExternal(_)));
         let provisional = match &origin {
-            Some(ChatOrigin::Provisional(tag)) => Some(tag.clone()),
+            Some(ChatOrigin::Provisional(tag) | ChatOrigin::ProvisionalUnder(tag, _)) => Some(tag.clone()),
             _ => None,
         };
         let (parent_chat_id, scheduled_task_info) = match origin {
             Some(ChatOrigin::Parent(parent)) if !parent.trim().is_empty() => (Some(parent), None),
+            Some(ChatOrigin::ProvisionalUnder(_, parent)) if !parent.trim().is_empty() => (Some(parent), None),
             Some(ChatOrigin::Scheduled(task, parent)) => (parent, Some(task)),
             Some(ChatOrigin::ArchivedExternal(task)) => (None, Some(task)),
             _ => (None, None),

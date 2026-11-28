@@ -1541,6 +1541,7 @@ No active workers.");
             p.standing_role.map(|kind| {
                 mast_proto::standing_role_provisional_marker(kind, &p.work_item_id, op)
             }),
+            p.standing_role == Some(mast_proto::StandingRoleKind::Lead),
         )?;
         // A Work Outline launch has no Run worktree directive, so stamp the
         // branch needed for opted-in PR tracking here. This launch-time lookup
@@ -2225,6 +2226,10 @@ No active workers.");
                 .iter()
                 .filter(|other| other.id != item.id && other.id != lead_item && other.archived_at.is_none())
                 .filter(|other| snapshot.is_within(&lead_item, &other.id))
+                // Only items a live Worker is running on hold a share.
+                .filter(|other| {
+                    snapshot.listed_chat_ids(other).any(|id| chats.iter().any(|chat| chat.id == id && !chat.archived))
+                })
                 .filter_map(|other| specs.get(&other.id))
                 .map(|s| s.item_budget.clone())
                 .collect();
@@ -2429,6 +2434,7 @@ No active workers.");
         config: Option<ChatConfig>,
         parent_chat_id: Option<&str>,
         provisional_tag: Option<String>,
+        lead_role_chat: bool,
     ) -> Result<(), WorkOutlineError> {
         match self.workspace.chat(chat_id).map_err(engine_error)? {
             Some(chat) => {
@@ -2444,12 +2450,14 @@ No active workers.");
                 Ok(())
             }
             None => match provisional_tag {
-                Some(tag) => self.workspace.create_provisional_role_chat(
+                Some(tag) => self.workspace.create_provisional_role_chat_under(
                     chat_id,
                     space_id,
                     config,
                     execution_root.to_owned(),
                     tag,
+                    // Only a Lead has a parent (its Manager); other roles start unparented.
+                    parent_chat_id.filter(|_| lead_role_chat).map(str::to_owned),
                 ),
                 None => self.workspace.create_chat_with_parent(
                     chat_id,
