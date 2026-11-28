@@ -689,7 +689,7 @@ impl WorkItemLaunchService {
                 standing_role: None,
             };
             self.create_orchestrator_successor_locked(&params, wakes, source,
-                HandOffOrigin::User { archive: Some(true), observed_roles: &observed, automatic: false }, Some((&run.snapshot, generation.as_deref()))).await
+                HandOffOrigin::User { archive: Some(true), observed_roles: &observed, automatic: false }, Some((&run.snapshot, generation.as_deref())), true).await
                 .map_err(|e| EngineError::Other(e.message))?;
         } else if target == candidate && current.is_none() {
             let params = CreateChatForWorkItemParams {
@@ -749,7 +749,7 @@ impl WorkItemLaunchService {
         origin: HandOffOrigin<'_>,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
         let _gate = self.gate.lock().await;
-        self.create_orchestrator_successor_locked(p, wakes, source, origin, None).await
+        self.create_orchestrator_successor_locked(p, wakes, source, origin, None, true).await
     }
 
     async fn create_orchestrator_successor_locked(
@@ -759,9 +759,14 @@ impl WorkItemLaunchService {
         source: &str,
         origin: HandOffOrigin<'_>,
         scheduled: Option<(&mast_proto::ScheduledTaskDraft, Option<&str>)>,
+        inherit_account: bool,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
         let requested_successor = derive_id(&p.operation_id, roles::CHAT);
         let mut successor = self.handoff_successor_request(p, source)?;
+        // A credit-limit successor never inherits the stalled chat's account pin.
+        if !inherit_account {
+            successor.account_id = None;
+        }
         // A hand-off that stopped after workers moved is finished by asking
         // again with the same summary and settings, even from a reopened
         // dialog or after a restart that minted a fresh operation id.
@@ -805,6 +810,7 @@ impl WorkItemLaunchService {
     /// launch picks that harness's defaults.
     pub(crate) async fn create_credit_successor(
         &self, stalled: &str, operation_id: &str, harness: mast_proto::HarnessId, prompt: String,
+        wakes: &crate::orchestrator_wakes::OrchestratorWakes,
     ) -> Result<CreateChatForWorkItemReply, WorkOutlineError> {
         let work_item_id = self.workspace
             .registry_row(mast_doc::KIND_WORK_ITEM_CHAT_ASSIGNMENTS, stalled)
@@ -831,11 +837,33 @@ impl WorkItemLaunchService {
             account_id: None,
             standing_role: None,
         };
-        let mut request = self.handoff_successor_request(&request, stalled)?;
-        // The stalled chat's account pin is always dropped, on its own harness
-        // too: a successor never inherits it.
-        request.account_id = None;
-        self.create_chat_for_work_item(&request).await
+        // The successor is a real hand-off of the stalled chat: lineage is
+        // recorded, its own workers and pending wakes move to the successor,
+        // and the stalled chat is kept (it may run again once its limit
+        // resets). A chat that already handed off to another successor, or
+        // that holds a standing role, is launched as a plain successor.
+        let successor = derive_id(operation_id, roles::CHAT);
+        let handed_off_elsewhere = self.workspace.handed_off_to(stalled).is_some_and(|to| to != successor);
+        let source_chat = self.workspace.chat(stalled).map_err(engine_error)?;
+        let real_hand_off = !handed_off_elsewhere
+            && !self.workspace.chat_in_standing_role(stalled)
+            && source_chat.as_ref().is_some_and(|chat| !chat.archived);
+        let Some(source_chat) = source_chat.filter(|_| real_hand_off) else {
+            let mut request = self.handoff_successor_request(&request, stalled)?;
+            // The stalled chat's account pin is always dropped, on its own harness
+            // too: a successor never inherits it.
+            request.account_id = None;
+            return self.create_chat_for_work_item(&request).await;
+        };
+        let observed = crate::handoff_roles::RoleObservations::capture(
+            &self.workspace, &self.sessions.agent_tokens(), &source_chat,
+        );
+        let _gate = self.gate.lock().await;
+        self.create_orchestrator_successor_locked(
+            &request, wakes, stalled,
+            HandOffOrigin::User { archive: Some(false), observed_roles: &observed, automatic: false },
+            None, false,
+        ).await
     }
 
     /// Whether the successor chat for `operation_id` has its first turn queued
@@ -3034,6 +3062,7 @@ mod credit_successor_tests {
             auto_approve: false,
         };
         let launch = &core.work_item_launch;
+        let wakes = &core.orchestrator_wakes;
         let stalled = launch.create_chat_for_work_item(&CreateChatForWorkItemParams {
             work_item_id: derive_id("item-w", roles::ITEM),
             initial_prompt: WorkItemPrompt { text: "do the task".into(), attachments: Vec::new() },
@@ -3048,7 +3077,7 @@ mod credit_successor_tests {
         }).await.unwrap().chat_id;
         let stalled_config = core.workspace.chat_config(&stalled).unwrap();
 
-        let same = launch.create_credit_successor(&stalled, "successor-same", HarnessId::ClaudeCode, "go on".into())
+        let same = launch.create_credit_successor(&stalled, "successor-same", HarnessId::ClaudeCode, "go on".into(), wakes)
             .await.unwrap().chat_id;
         let kept = core.workspace.chat_config(&same).unwrap();
         assert_ne!(same, stalled);
@@ -3057,9 +3086,14 @@ mod credit_successor_tests {
         assert_eq!(kept.reasoning, Some(ReasoningLevel::High));
         assert_eq!(kept.model_options, stalled_config.model_options);
         assert_eq!(kept.model_options.get("contextWindow"), Some(&json!("400000")));
+        // A real hand-off: lineage is recorded, the successor reports to the
+        // same parent, and the stalled chat is kept.
+        assert_eq!(core.workspace.handed_off_to(&stalled).as_deref(), Some(same.as_str()));
+        assert_eq!(core.workspace.chat(&same).unwrap().unwrap().parent_chat_id.as_deref(), Some("manager"));
+        assert!(!core.workspace.chat(&stalled).unwrap().unwrap().archived);
 
         // A retry of the same operation returns the same chat.
-        let again = launch.create_credit_successor(&stalled, "successor-same", HarnessId::ClaudeCode, "go on".into())
+        let again = launch.create_credit_successor(&stalled, "successor-same", HarnessId::ClaudeCode, "go on".into(), wakes)
             .await.unwrap().chat_id;
         assert_eq!(again, same);
 
@@ -3068,7 +3102,7 @@ mod credit_successor_tests {
         codex.harness = HarnessId::Codex;
         codex.model = Some("gpt-5".into());
         core.workspace.set_chat_config(&stalled, &codex).unwrap();
-        let cross = launch.create_credit_successor(&stalled, "successor-cross", HarnessId::ClaudeCode, "go on".into())
+        let cross = launch.create_credit_successor(&stalled, "successor-cross", HarnessId::ClaudeCode, "go on".into(), wakes)
             .await.unwrap().chat_id;
         let fresh = core.workspace.chat_config(&cross).unwrap();
         assert_eq!(fresh.harness, HarnessId::ClaudeCode);

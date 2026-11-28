@@ -776,7 +776,7 @@ impl CreditFallback {
             if let Some((commit, repository)) = saved {
                 prompt.push_str(&checkpoint_note(&commit, &repository));
             }
-            match self.launch.create_credit_successor(chat_id, &operation, harness, prompt).await {
+            match self.launch.create_credit_successor(chat_id, &operation, harness, prompt, &self.wakes).await {
                 Ok(_) => {}
                 // The same operation with different inputs (the stalled chat's
                 // settings changed): fine only if the first attempt got its turn in.

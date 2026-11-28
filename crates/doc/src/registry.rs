@@ -1578,7 +1578,7 @@ impl RegistryDoc {
 
     /// The chat a recorded hand-off made out of `from` (the latest, when a
     /// retry recorded more than one).
-    fn hand_off_successor(&self, from: &str) -> Option<String> {
+    pub fn hand_off_successor(&self, from: &str) -> Option<String> {
         self.read_chats().ok()?.into_iter()
             .filter_map(|chat| {
                 let provenance = self.overlay_row(KIND_CHATS, &chat.id)?

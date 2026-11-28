@@ -891,6 +891,11 @@ impl WorkspaceHost {
         self.read(|doc| doc.live_parent(chat_id))
     }
 
+    /// The chat a recorded hand-off made out of `chat_id`, if any.
+    pub fn handed_off_to(&self, chat_id: &str) -> Option<String> {
+        self.read(|doc| doc.hand_off_successor(chat_id))
+    }
+
     /// Point chats left under an archived hand-off predecessor at its live
     /// successor. Idempotent. Returns the chats moved.
     pub fn repair_stale_parent_chats(&self) -> Vec<String> {
