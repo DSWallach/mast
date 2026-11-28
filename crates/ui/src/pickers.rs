@@ -5672,6 +5672,7 @@ impl Pickers {
                 format!("model-setting-{ix}"),
             )
             .id(("model-setting", ix))
+            .debug_selector(move || format!("model-setting-{ix}"))
             .relative()
             .h(px(crate::components::conversation_menu_row_height(
                 &theme, 30.0,
@@ -5791,6 +5792,10 @@ impl Pickers {
                                         format!("setting-choice-{ix}-{choice_ix}"),
                                     )
                                     .id(("setting-choice", choice_ix))
+                                    .debug_selector({
+                                        let choice_id = choice.value.clone();
+                                        move || format!("setting-choice-{choice_id}")
+                                    })
                                     .h(px(crate::components::conversation_menu_row_height(
                                         &theme, 30.0,
                                     )))
@@ -6322,6 +6327,8 @@ impl Render for Pickers {
         // run's configuration reads without opening anything, and the suffix
         // brightens only when something departs from its default. No suffix
         // when the model has neither a ladder nor options (e.g. Hermes).
+        // What the chip reads, for the headless UI driver: model, then its traits.
+        let chip_state = format!("{model_label}|{}", traits_set.clone().unwrap_or_default());
         let chip_suffix = traits_set.map(|summary| {
             (
                 SharedString::from(summary),
@@ -6380,7 +6387,7 @@ impl Render for Pickers {
                     }
                 }))
         } else {
-            model_chip
+            model_chip.debug_selector(move || format!("composer-model-chip:{chip_state}"))
         };
         let model_chip = if new_chat {
             if overlay
