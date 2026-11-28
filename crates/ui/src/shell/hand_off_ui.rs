@@ -972,15 +972,14 @@ mod tests {
             shell.submit_hand_off(cx);
         });
         cx.run_until_parked();
-        super::super::chat_item_tests::draw(cx);
         shell.read_with(cx, |shell, _| {
             assert!(shell.work_outline_modal.is_none());
             let notice = shell.notice.as_ref().expect("a notice");
             assert_eq!(notice.text.as_ref(), "Handed off to a new chat");
             assert_eq!(notice.action.as_ref().map(|(label, chat)| (label.as_ref(), chat.as_str())), Some(("Open", "successor")));
         });
-        assert!(cx.debug_bounds("shell-notice").is_some());
-        assert!(cx.debug_bounds("shell-notice-action").is_some());
+        // (The strip itself is drawn with the Shell's overlays, which this harness does not
+        // render; the ui-driver flow checks it on screen.)
         // A second notice replaces the first.
         shell.update(cx, |shell, cx| shell.show_notice("Another", None, cx));
         shell.read_with(cx, |shell, _| assert_eq!(shell.notice.as_ref().unwrap().text.as_ref(), "Another"));
