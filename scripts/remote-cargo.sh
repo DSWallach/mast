@@ -310,6 +310,8 @@ f=/tmp/$1
 if [ -e "$f.exit" ]; then echo "exit $(cat "$f.exit")"; exit 0; fi
 if [ ! -e "$f.pid" ]; then echo unknown; exit 1; fi
 if alive "$1"; then echo running; exit 0; fi
+# The runner writes the marker before it exits: a job that finished since the check above has one now.
+if [ -e "$f.exit" ]; then echo "exit $(cat "$f.exit")"; exit 0; fi
 echo died; exit 1
 EOF
 )
@@ -331,7 +333,10 @@ name=$1
 f=/tmp/$name
 if [ -e "$f.exit" ]; then echo "already finished: exit $(cat "$f.exit")"; exit 0; fi
 if [ ! -e "$f.pid" ]; then echo "unknown job: $name"; exit 2; fi
-if ! alive "$name"; then echo "not running: it died without an exit marker"; exit 1; fi
+if ! alive "$name"; then
+    if [ -e "$f.exit" ]; then echo "already finished: exit $(cat "$f.exit")"; exit 0; fi
+    echo "not running: it died without an exit marker"; exit 1
+fi
 p=$(cat "$f.pid")
 if [ ! -s "$f.start" ]; then echo "refusing: no recorded start time to tell pid $p from a reused one"; exit 1; fi
 g=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ')

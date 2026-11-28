@@ -90,6 +90,28 @@ check "wait after stop reports the stopped exit" 1 "exit 143" -- rc wait h $tag-
 check "the slot is free after stop" 0 "started" -- rc start h "$tmp/wt" $tag $tag-after -- cargo ok
 check "wait for the next job" 0 "exit 0" -- rc wait h $tag-after 20s
 
+# A job that finishes while status is looking at it is finished, not dead. The fake `cat` makes the
+# runner "finish" at the moment status reads the pid: it writes the exit marker and answers a dead pid.
+REAL_CAT=$(command -v cat)
+export REAL_CAT
+cat > "$tmp/bin/cat" <<'EOF'
+#!/bin/sh
+if [ -n "${FAKE_FINISH:-}" ] && [ "$1" = "/tmp/$FAKE_FINISH.pid" ]; then
+    echo 0 > "/tmp/$FAKE_FINISH.exit"
+    echo 999999999
+    exit 0
+fi
+exec "$REAL_CAT" "$@"
+EOF
+chmod +x "$tmp/bin/cat"
+echo 999999999 > "/tmp/$tag-finishing.pid"
+check "status of a job that finishes mid-check reports its exit" 0 "exit 0" -- \
+    env FAKE_FINISH=$tag-finishing sh "$script" status h $tag-finishing
+rm -f "/tmp/$tag-finishing.exit"
+check "stop of a job that finishes mid-check finds it finished" 0 "already finished: exit 0" -- \
+    env FAKE_FINISH=$tag-finishing sh "$script" stop h $tag-finishing
+rm -f "$tmp/bin/cat"
+
 # A pid the host reused for another process is not the job: wait and status say it died, stop
 # refuses and leaves the stranger alone.
 sleep 60 & stranger=$!
