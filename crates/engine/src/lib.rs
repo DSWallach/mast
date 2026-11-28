@@ -57,6 +57,7 @@ pub mod liveness;
 pub mod local_import;
 pub mod managed_accounts;
 pub mod manager_status;
+pub mod model_fit;
 mod model_catalogs;
 pub mod orchestrator_wakes;
 mod automatic_manager_handoff;
