@@ -76,9 +76,11 @@ impl HeadroomSource for AccountWindows<'_> {
 pub fn is_time_label(label: &str) -> bool {
     let lower = label.trim().to_ascii_lowercase();
     lower.starts_with(|c: char| c.is_ascii_digit())
-        || ["session", "hour", "day", "daily", "week", "month", "wk", "mo"]
-            .iter()
-            .any(|word| lower.contains(word))
+        || [
+            "session", "hour", "day", "daily", "week", "month", "wk", "mo",
+        ]
+        .iter()
+        .any(|word| lower.contains(word))
 }
 
 /// A window set against a cap.
@@ -180,10 +182,17 @@ mod tests {
         };
         let source = AccountWindows(Some(&snapshot));
         let claude = source.windows(HarnessId::ClaudeCode);
-        let labels: Vec<_> = claude.iter().map(|w| (w.label.as_str(), w.model.as_deref())).collect();
+        let labels: Vec<_> = claude
+            .iter()
+            .map(|w| (w.label.as_str(), w.model.as_deref()))
+            .collect();
         assert_eq!(
             labels,
-            [("Session", None), ("Week", None), ("Sonnet", Some("Sonnet"))]
+            [
+                ("Session", None),
+                ("Week", None),
+                ("Sonnet", Some("Sonnet"))
+            ]
         );
         assert_eq!(claude[0].used, 0.4, "the inactive account is not read");
         assert_eq!(source.windows(HarnessId::Codex).len(), 1);
