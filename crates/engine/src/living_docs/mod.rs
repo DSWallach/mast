@@ -13,6 +13,7 @@
 //! See `docs/internal/living-docs.md`.
 
 pub mod drift;
+pub mod land;
 pub mod rules;
 pub mod staleness;
 pub mod store;
@@ -26,7 +27,9 @@ pub use drift::{DriftFinding, DriftKind, FsRepoTree, KnownSymbols, RepoTree, che
 pub use rules::{SeedRule, default_seed_rules, merge_blast_radius, seed_rows, watch_matches};
 pub use staleness::DocStatusChange;
 pub use store::{ExemptReceipt, LivingDocStore, ProjectLedger};
-pub use summary::{DocLedgerDigest, MAX_SUMMARY_TEXT_BYTES, build_doc_ledger_summary};
+pub use summary::{
+    DocLedgerDigest, MAX_SUMMARY_TEXT_BYTES, build_doc_ledger_summary, render_handoff_section,
+};
 
 /// `doc_id` prefix of a document tracked in the repository.
 pub const REPO_PREFIX: &str = "repo:";

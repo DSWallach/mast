@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent_tools::AgentTokens;
 use crate::doc_host::DocHost;
 use crate::handoff_role_file::write_json;
+use crate::living_docs::LivingDocStore;
 use crate::orchestrator_wakes::OrchestratorWakes;
 use crate::{EngineError, WorkspaceHost};
 
@@ -122,6 +123,9 @@ struct State {
     automatic: Vec<AutomaticHandoff>,
     checkpoints_path: Option<PathBuf>,
     checkpoints: BTreeMap<String, ManagerCheckpoint>,
+    /// The documentation ledger a Manager hand-off carries forward. Opened
+    /// beside the pending file; absent when its file cannot be read.
+    living_docs: Option<Arc<LivingDocStore>>,
 }
 
 impl State {
@@ -189,8 +193,27 @@ impl PendingHandoffs {
             }
         };
         state.checkpoints_path = Some(checkpoints_path);
+        // Like a checkpoint, the ledger only adds to a hand-off: an unreadable
+        // file is left in place and must not keep the engine from starting.
+        if let Some(dir) = path.parent() {
+            match LivingDocStore::open(dir) {
+                Ok(store) => state.living_docs = Some(Arc::new(store)),
+                Err(error) => tracing::warn!(%error, "hand-offs will carry no documentation ledger"),
+            }
+        }
         state.path = Some(path);
         Ok(())
+    }
+
+    /// The documentation ledger, once the store is open.
+    pub(crate) fn living_docs(&self) -> Option<Arc<LivingDocStore>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).living_docs.clone()
+    }
+
+    /// Use `store` as the ledger hand-offs carry (the one a land hook feeds).
+    #[cfg(test)]
+    pub(crate) fn set_living_docs(&self, store: Arc<LivingDocStore>) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).living_docs = Some(store);
     }
 
     pub(crate) fn checkpoints(&self) -> HashMap<String, ManagerCheckpoint> {
