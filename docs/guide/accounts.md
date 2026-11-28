@@ -56,12 +56,14 @@ Open **Settings → Accounts** and find **Quota caps**, below the accounts. Caps
 - **Soft cap**, **Hard cap** and **Freeze cap**: adjust each in 1% steps. The defaults are 78%, 85% and 90%. The hard cap can be 50% to 95%. The soft cap must stay below the hard cap, and the freeze cap above it (up to 100%). While they don't, the section says why and **Save** is disabled.
 - **Reset to defaults** puts Balanced failover and the default caps back in the controls. Click **Save** to keep them.
 
-Nothing changes until you click **Save**. The device switcher at the top of the page picks whose settings you see and change; switching devices drops unsaved edits, while **Refresh** keeps them. Each device keeps one set of settings per Mast profile. The caps are the same for every provider: there are no per-provider caps yet.
+Nothing changes until you click **Save**. The device switcher at the top of the page picks whose settings you see and change; switching devices drops unsaved edits, while **Refresh** keeps them. Each device keeps one set of settings per Mast profile. The mode and caps are not set per project: you can't pick projects individually yet. The caps are the same for every provider: there are no per-provider caps yet.
+
+A cap you don't adjust is saved exactly as it was. If something other than this page saved a fraction of a percent, or a hard cap outside 50% to 95%, the section shows that value, and you can change the mode without changing it.
 
 Once connected, it will check each provider's usage every 90 seconds (180 seconds for Antigravity `/usage`) while orchestration is active. It will only read usage and never refresh a single-use sign-in token. If a provider can't be read, it will use an estimate from local token usage. A provider that needs sign-in, or has neither a reading nor an estimate, will get no new work.
 
 - **Balanced failover** (default): new work will be spread by the room each provider has below the hard cap. A provider will keep the work until it reaches the soft cap and another provider below that cap has room. When no provider can take work, orchestration will pause and try again when one may have room.
-- **Pinned freeze**: for pinned projects. Work will never move to another provider. When work would pass the freeze cap, or the provider's usage can't be trusted, Mast will freeze, save a checkpoint and notify you.
+- **Pinned freeze**: work will never move to another provider. When work would pass the freeze cap, or the provider's usage can't be trusted, Mast will freeze, save a checkpoint and notify you.
 
 ## Antigravity account homes
 
