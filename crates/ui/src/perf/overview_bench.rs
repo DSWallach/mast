@@ -287,7 +287,14 @@ fn build_watch_overview_rows_cost_nothing_while_no_build_jobs_exist(cx: &mut gpu
         cx.notify();
     });
     assert_ne!(state.read_with(vcx, |state, _| state.overview_fingerprint(now)), plain);
-    overview.update(vcx, |o, _| o.rows_dirty = true);
+    overview.update(vcx, |o, cx| {
+        o.rows_dirty = true;
+        cx.notify();
+    });
+    // The Overview hands its rows to the Outline entity while it renders, so the Outline's own
+    // repaint (where the badge is read) lands on the following frame.
+    draw(vcx);
+    vcx.run_until_parked();
     draw(vcx);
     assert!(
         crate::build_watch::jobs::counts::lookups() > lookups_before,
