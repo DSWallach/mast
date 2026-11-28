@@ -1,0 +1,1 @@
+- Disabled buttons dim and ignore hover in one place; the hard-cap slider stops at the highest cap that can save; the Done check no longer appears beside a queue label.
