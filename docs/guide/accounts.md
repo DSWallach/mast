@@ -44,6 +44,13 @@ Besides the 5-hour **Session** and **Week** windows, an account shows every othe
 
 Chats on Antigravity, Grok, Devin, Hermes, Pi and opencode tag a quota error the same way Claude Code and Codex do: **5-hour limit**, **weekly limit** (a weekly limit that names one model is treated as that model's own), a general **usage limit** (out of credits or plan usage), or a **temporary rate limit**. A temporary rate limit never reads as out of credits: its message says the account is being throttled and to retry shortly, so Mast does not offer to switch your default model for it. Reset times are not known for these agents.
 
+## Cap modes
+
+While orchestration is active, Mast polls each provider's usage every 90 seconds (180 seconds for Antigravity `/usage`). It only reads usage and never refreshes a single-use sign-in token. If a provider can't be read, Mast estimates from local token usage.
+
+- **Balanced failover** (default): new work goes to the provider with the most headroom below the 85% hard cap. A provider keeps the work until it passes the 78% soft cap. When every provider is at cap, orchestration pauses until the earliest reset.
+- **Pinned freeze**: used for pinned projects. Work never moves to another provider. At 90% Mast freezes, checkpoints and notifies you.
+
 ## Antigravity account homes
 
 An Antigravity login lives in a Gemini home folder (`~/.gemini` by default). When Mast points a chat at a Mast-managed home, it sets **both** `GEMINI_HOME` (the name Mast's own Antigravity setup reads) and `GEMINI_CLI_HOME` to that one folder.
