@@ -57,12 +57,31 @@ pub fn build_doc_ledger_summary(
         resync_job,
         ..pins
     };
-    let (text, omitted_from_text) = render(&summary);
+    let (text, omitted_from_text) = render(&summary, MAX_SUMMARY_TEXT_BYTES);
     DocLedgerDigest {
         summary,
         omitted_from_text,
         text,
     }
+}
+
+/// The digest a hand-off prompt carries: every row owed work and every queued
+/// delta, with no size cap. A successor must not lose a row to the bounded
+/// [`DocLedgerSummary`] text, and the row count is the number of tracked
+/// documents, which is small.
+pub fn render_handoff_section(summary: &DocLedgerSummary) -> String {
+    let (mut text, _) = render(summary, usize::MAX);
+    for row in &summary.pending_rows {
+        for delta in &row.pending_deltas {
+            text.push_str(&format!(
+                "  delta for {}: from {}: {}\n",
+                field(&row.doc_id),
+                field(&delta.work_item_id),
+                field(&delta.summary)
+            ));
+        }
+    }
+    text
 }
 
 fn urgency(status: DocDriftStatus) -> u8 {
@@ -74,7 +93,7 @@ fn urgency(status: DocDriftStatus) -> u8 {
     }
 }
 
-fn render(pins: &DocLedgerSummary) -> (String, usize) {
+fn render(pins: &DocLedgerSummary, cap: usize) -> (String, usize) {
     let rows = &pins.pending_rows;
     let mut text = String::from("Documentation ledger\n");
     let revision = |rev: Option<u32>| rev.map(|rev| format!(" rev {rev}")).unwrap_or_default();
@@ -134,7 +153,7 @@ fn render(pins: &DocLedgerSummary) -> (String, usize) {
         } else {
             TAIL_RESERVE
         };
-        if text.len() + line.len() + reserve > MAX_SUMMARY_TEXT_BYTES {
+        if text.len() + line.len() + reserve > cap {
             let omitted = rows.len() - index;
             text.push_str(&format!(
                 "... and {omitted} more; read the ledger for the rest.\n"

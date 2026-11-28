@@ -977,3 +977,47 @@ fn a_forced_cancel_does_not_hide_a_landing_it_could_not_save() {
     assert_eq!(landed.state, LandState::Landed);
     f.assert_clean();
 }
+
+#[test]
+fn landing_mcp_tool_code_without_docs_mcp_owes_the_doc() {
+    use mast_engine::living_docs::land::merge_queue_hook;
+    use mast_engine::living_docs::{DocDriftStatus, LivingDocStore, default_seed_rules, seed_rows};
+
+    let f = Fixture::new(&[
+        ("docs/mcp.md", "# MCP\n"),
+        ("crates/mcp/src/tools/echo.rs", "// echo\n"),
+    ]);
+    let data = tempfile::tempdir().unwrap();
+    let store = Arc::new(LivingDocStore::open(data.path()).unwrap());
+    store
+        .update("proj", |ledger| {
+            seed_rows(&mut ledger.rows, default_seed_rules(), "item", |path| {
+                let spec = format!("{}:{path}", f.base);
+                try_git(&f.repo, &["cat-file", "-e", &spec]).then(|| git(&f.repo, &["rev-parse", &spec]))
+            });
+        })
+        .unwrap();
+    f.queue.set_land_hook(merge_queue_hook(store.clone()));
+    let docs = |store: &LivingDocStore| {
+        store
+            .ledger("proj")
+            .rows
+            .into_iter()
+            .find(|row| row.doc_id == "repo:docs/mcp.md")
+            .unwrap()
+    };
+    assert_eq!(docs(&store).drift_status, DocDriftStatus::Fresh);
+
+    let sha = f.branch("tool", &[("crates/mcp/src/tools/echo.rs", "// echo 2\n")]);
+    let request = f.queue.submit(f.request("item-1", &sha, None)).unwrap();
+    f.drive();
+    *f.builder.exit.lock().unwrap() = Some(0);
+    f.drive();
+    f.queue.record_verdict(&request.id, approve(&sha)).unwrap();
+    f.drive();
+    let landed = f.state(&request);
+    assert_eq!(landed.state, LandState::Landed, "{:?}", landed.reason);
+    let row = docs(&store);
+    assert_eq!(row.drift_status, DocDriftStatus::OwedUpdate);
+    assert_eq!(row.owed_since_commit, landed.candidate_sha);
+}

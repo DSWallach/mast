@@ -402,7 +402,7 @@ fn start_inner(
                 let prompt = if manager {
                     let status = status().and_then(|entry| entry.content)
                         .unwrap_or_else(|| no_status_text(&host, &session.chat_id));
-                    format!("Continue this project using the latest Manager status:\n\n{status}")
+                    manager_prompt(&status, tokens.pending_handoffs.living_docs().as_deref(), &role.scope_item_id)
                 } else {
                     format!("Continue the personal assistant role. Read the preceding chat {} for its conversation and decisions, then pick up where it left off.", session.chat_id)
                 };
@@ -460,6 +460,26 @@ fn start_inner(
     cancel
 }
 
+
+/// The successor Manager's first prompt: the latest status, then the project's
+/// documentation ledger. Every row still owed work and every queued delta is
+/// listed in full, so the successor owes what the predecessor owed.
+pub(crate) fn manager_prompt(
+    status: &str,
+    ledger: Option<&crate::living_docs::LivingDocStore>,
+    project: &str,
+) -> String {
+    let mut prompt = format!("Continue this project using the latest Manager status:\n\n{status}");
+    if let Some(ledger) = ledger {
+        let rows = ledger.ledger(project).rows;
+        let digest = crate::living_docs::build_doc_ledger_summary(Default::default(), &rows, None);
+        if !digest.summary.pending_rows.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&crate::living_docs::render_handoff_section(&digest.summary));
+        }
+    }
+    prompt
+}
 
 /// The latest Manager status of a project, if it has readable content.
 pub(crate) fn manager_status(artifacts: &ArtifactsService, space: &str, scope_item_id: &str) -> Option<String> {
@@ -521,4 +541,64 @@ fn notify_handoff_retry(
         &format!("[Mast system message: {message}]"),
         chrono::Utc::now().timestamp_millis(),
     )
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::manager_prompt;
+    use crate::handoff_roles::PendingHandoffs;
+    use crate::living_docs::{DocDeltaRef, DocDriftStatus, LivingDocRow};
+
+    fn row(id: &str, status: DocDriftStatus, deltas: &[&str]) -> LivingDocRow {
+        LivingDocRow {
+            doc_id: id.into(),
+            drift_status: status,
+            owed_since_commit: (status == DocDriftStatus::OwedUpdate).then(|| "abc1234567890".into()),
+            pending_deltas: deltas
+                .iter()
+                .map(|summary| DocDeltaRef { work_item_id: "w1".into(), summary: (*summary).into() })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// A Manager hand-off across an engine restart keeps every owed row and
+    /// every queued delta, even past the bounded summary's size cap.
+    #[test]
+    fn a_manager_handoff_keeps_every_owed_row_and_pending_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let pending = PendingHandoffs::default();
+        pending.open(dir.path().join("pending-handoffs.json")).unwrap();
+        let ledger = pending.living_docs().unwrap();
+        ledger
+            .update("proj", |l| {
+                l.rows.push(row("repo:fresh.md", DocDriftStatus::Fresh, &[]));
+                l.rows.push(row("repo:docs/mcp.md", DocDriftStatus::OwedUpdate, &[]));
+                l.rows.push(row("repo:docs/drifted.md", DocDriftStatus::DriftDetected, &[]));
+                l.rows.push(row("artifact:a1", DocDriftStatus::Fresh, &["add the retry section"]));
+                for n in 0..60 {
+                    l.rows.push(row(&format!("repo:docs/many/{n:02}-{}.md", "x".repeat(40)), DocDriftStatus::OwedUpdate, &[]));
+                }
+            })
+            .unwrap();
+        drop(ledger);
+        drop(pending);
+
+        // The successor's engine reopens the store from disk.
+        let reopened = PendingHandoffs::default();
+        reopened.open(dir.path().join("pending-handoffs.json")).unwrap();
+        let prompt = manager_prompt("STATUS BODY", reopened.living_docs().as_deref(), "proj");
+        assert!(prompt.starts_with("Continue this project using the latest Manager status:\n\nSTATUS BODY"));
+        assert!(prompt.contains("[owed] repo:docs/mcp.md since abc1234567"));
+        assert!(prompt.contains("[drift] repo:docs/drifted.md"));
+        assert!(prompt.contains("[deltas] artifact:a1 (1 pending deltas)"));
+        assert!(prompt.contains("delta for artifact:a1: from w1: add the retry section"));
+        assert!(!prompt.contains("fresh.md"));
+        assert!(!prompt.contains("more; read the ledger"), "no row may be cut: {prompt}");
+        for n in 0..60 {
+            assert!(prompt.contains(&format!("repo:docs/many/{n:02}-")), "row {n} lost");
+        }
+        // Another project's ledger, and a clean one, add nothing.
+        assert!(!manager_prompt("S", reopened.living_docs().as_deref(), "other").contains("Documentation ledger"));
+    }
 }

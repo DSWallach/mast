@@ -279,7 +279,13 @@ struct Inner {
     builds: BuildJobs,
     /// Serializes every change, so a verdict or a cancel never races a step.
     changes: Mutex<()>,
+    /// Called after each landing is saved.
+    land_hook: Mutex<Option<LandHook>>,
 }
+
+/// Runs after a landing is recorded, under the queue's change lock: keep it
+/// short and never call back into the queue. A hook cannot fail the land.
+pub type LandHook = Arc<dyn Fn(&LandRequest, &LandedRecord) + Send + Sync>;
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -349,8 +355,14 @@ impl MergeQueue {
                 store,
                 builds,
                 changes: Mutex::new(()),
+                land_hook: Mutex::new(None),
             }),
         })
+    }
+
+    /// Run `hook` after every landing from now on (replacing any earlier one).
+    pub fn set_land_hook(&self, hook: LandHook) {
+        *self.inner.land_hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
     fn changes(&self) -> MutexGuard<'_, ()> {
@@ -1133,6 +1145,10 @@ impl MergeQueue {
             landed_at: request.updated_at,
         };
         self.inner.store.save_landed(request, &landing)?;
+        let hook = self.inner.land_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(hook) = hook {
+            hook(request, &landing);
+        }
         self.clean_up(request);
         Ok(())
     }
