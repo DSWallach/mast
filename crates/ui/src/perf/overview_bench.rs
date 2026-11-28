@@ -221,6 +221,8 @@ fn build_watch_overview_rows_cost_nothing_while_no_build_jobs_exist(cx: &mut gpu
     state.update(cx, |state, _| {
         state.data_dir = Some(dir.path().to_path_buf());
         state.chats = (0..250).map(chat_row).collect();
+        // `c1` is read, so its row is Idle: only an Idle or Working chat shows a build badge.
+        state.chats[1].last_seen_at = Some(Utc::now());
         state.spaces = vec![mast_proto::Space {
             id: SPACE.into(),
             device_id: "local".into(),
@@ -255,6 +257,8 @@ fn build_watch_overview_rows_cost_nothing_while_no_build_jobs_exist(cx: &mut gpu
         o.view_mode = OverviewMode::Outline;
         o.rows_dirty = true;
     });
+    // Single-chat items compact to a dot with no status text; the badge lives on a full chat row.
+    overview.update(vcx, |o, cx| o.set_compact_single_chat(false, cx));
     let now = Utc::now();
     let lookups_before = crate::build_watch::jobs::counts::lookups();
     draw(vcx);
@@ -279,7 +283,7 @@ fn build_watch_overview_rows_cost_nothing_while_no_build_jobs_exist(cx: &mut gpu
         state.set_test_build_jobs(snapshot_with(vec![mast_proto::BuildJobView {
             job_id: "j".into(),
             space_id: SPACE.into(),
-            chat_id: "c0".into(),
+            chat_id: "c1".into(),
             state: mast_proto::BuildJobState::Queued,
             position: Some(2),
             ..Default::default()
