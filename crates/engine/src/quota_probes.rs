@@ -384,8 +384,10 @@ mod tests {
         (url, requests)
     }
 
-    /// Never answers claude; answers codex at once.
-    async fn hanging_claude() -> String {
+    /// Never answers claude, reporting each request for it; answers codex at
+    /// once.
+    async fn hanging_claude() -> (String, tokio::sync::mpsc::UnboundedReceiver<()>) {
+        let (asked, claude_asked) = tokio::sync::mpsc::unbounded_channel();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -396,6 +398,7 @@ mod tests {
                 let read = stream.read(&mut buffer).await.unwrap_or(0);
                 if String::from_utf8_lossy(&buffer[..read]).starts_with("GET /claude") {
                     held.push(stream);
+                    let _ = asked.send(());
                     continue;
                 }
                 let body = r#"{"rate_limit":{"primary_window":{"used_percent":25.0}}}"#;
@@ -406,14 +409,14 @@ mod tests {
                 let _ = stream.write_all(response.as_bytes()).await;
             }
         });
-        url
+        (url, claude_asked)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_hanging_provider_does_not_block_another_status_read() {
         let root = tempfile::tempdir().unwrap();
         let (accounts, _) = signed_in(root.path());
-        let url = hanging_claude().await;
+        let (url, mut claude_asked) = hanging_claude().await;
         accounts.set_usage_urls(&format!("{url}/claude"), &format!("{url}/codex"));
         let service = QuotaService::default();
         let first = tokio::spawn({
@@ -421,6 +424,8 @@ mod tests {
             let root = root.path().to_path_buf();
             async move { service.status(&accounts, None, root).await.map(|_| ()) }
         });
+        // The first read now has claude's probe in flight.
+        claude_asked.recv().await.unwrap();
         // Well inside the 15 s probe timeouts.
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -438,6 +443,7 @@ mod tests {
         .await
         .expect("a read waited on the hanging provider");
         assert!(!first.is_finished(), "claude was still in flight");
+        assert!(claude_asked.try_recv().is_err(), "claude was asked once");
         first.abort();
     }
 
