@@ -91,6 +91,7 @@ mod recovery;
 mod remote_executor;
 mod runner;
 mod scheduler;
+pub mod startup;
 mod store;
 #[cfg(test)]
 mod tests;
