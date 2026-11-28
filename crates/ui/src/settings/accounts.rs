@@ -28,6 +28,7 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::managed_accounts::AccountFlow;
 use crate::observe_gate::ObserveGate;
 use crate::popover::{self, Loadable};
+use crate::settings::quota_caps::QuotaCaps;
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -207,6 +208,8 @@ pub struct AccountsPage {
     managed_task: Option<Task<()>>,
     account_flow: Option<Entity<AccountFlow>>,
     account_flow_sub: Option<Subscription>,
+    /// The "Quota caps" section; follows `target_device`.
+    quota: Entity<QuotaCaps>,
     seen: ObserveGate<(Vec<mast_proto::Device>, Option<String>)>,
     _observe: Subscription,
     _code_events: Subscription,
@@ -232,6 +235,7 @@ impl AccountsPage {
                 this.submit_code(cx);
             }
         });
+        let quota = cx.new(|cx| QuotaCaps::new(state.clone(), cx));
         let mut page = Self {
             state,
             scroll: widgets::PageScroll::default(),
@@ -253,6 +257,7 @@ impl AccountsPage {
             managed_task: None,
             account_flow: None,
             account_flow_sub: None,
+            quota,
             seen,
             _observe: observe,
             _code_events: code_events,
@@ -283,6 +288,9 @@ impl AccountsPage {
             return;
         }
         self.target_device = target;
+        let target = self.target_device.clone();
+        self.quota
+            .update(cx, |quota, cx| quota.set_target_device(target, cx));
         // A different device = a different accounts world: drop in-flight
         // login/action state and reload with a forced usage probe (the new
         // device's cache is cold).
@@ -1774,6 +1782,7 @@ impl Render for AccountsPage {
                                             .hover(|s| widgets::ghost_hover(&theme, s))
                                             .when(refreshing, |el| el.opacity(0.5))
                                             .on_click(cx.listener(|this, _, _, cx| {
+                                                this.quota.update(cx, |quota, cx| quota.refresh(cx));
                                                 this.load(
                                                     force_usage_for(LoadTrigger::Refresh),
                                                     cx,
@@ -1821,7 +1830,8 @@ impl Render for AccountsPage {
                                          macOS, an already-running Claude Code can hold the previous \
                                          login for up to ~30 seconds (Keychain cache).",
                                     )),
-                            ),
+                            )
+                            .child(self.quota.clone()),
                     ),
             )
             .children(scrollbar)
