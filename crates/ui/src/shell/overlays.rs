@@ -149,6 +149,7 @@ impl Shell {
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-pin-{chat_id}"))
                             .id("chat-menu-pin")
+                            .debug_selector(|| "chat-menu-pin".into())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.set_chat_pinned(pin_id.clone(), !is_pinned, cx)
                             }))
