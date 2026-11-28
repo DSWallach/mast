@@ -17,7 +17,9 @@ use std::{
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
-/// The recorded failure rate halves over this long without new evidence.
+/// The recorded failure rate halves over this long without new evidence. Trials
+/// older than this no longer count towards [`DEMOTE_MIN_TRIALS`], and a failure
+/// streak older than this is over.
 pub const HALF_LIFE_MS: i64 = 14 * DAY_MS;
 /// First demotion; each repeat doubles it.
 pub const DEMOTION_BASE_MS: i64 = 7 * DAY_MS;
@@ -89,7 +91,8 @@ pub struct Recorded {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FitState {
     pub tier: ModelTier,
-    /// Counted trials (passes and counted failures) since the last demotion.
+    /// Counted trials (passes and counted failures) since the last demotion and
+    /// within the last [`HALF_LIFE_MS`].
     pub trials: u32,
     /// Failure rate decayed to the time of the query.
     pub ewma_fail_rate: f64,
@@ -154,7 +157,8 @@ impl ModelFitLedger {
                task_id TEXT NOT NULL, task_class TEXT NOT NULL, harness TEXT NOT NULL, model TEXT NOT NULL,
                version TEXT NOT NULL, tier INTEGER NOT NULL, result TEXT NOT NULL, attribution TEXT NOT NULL,
                canary INTEGER NOT NULL, peak_context_tokens INTEGER, context_window_tokens INTEGER);
-             CREATE INDEX IF NOT EXISTS model_outcomes_task ON model_outcomes(task_id, task_class, harness, model);
+             CREATE INDEX IF NOT EXISTS model_outcomes_task ON model_outcomes(task_id, harness, model);
+             CREATE INDEX IF NOT EXISTS model_outcomes_fit ON model_outcomes(task_class, harness, model, at);
              CREATE TABLE IF NOT EXISTS model_fit_aggregates(
                task_class TEXT NOT NULL, harness TEXT NOT NULL, model TEXT NOT NULL, tier INTEGER NOT NULL,
                trials INTEGER NOT NULL, ewma_fail_rate REAL NOT NULL, consecutive_failures INTEGER NOT NULL,
@@ -163,6 +167,9 @@ impl ModelFitLedger {
              CREATE TABLE IF NOT EXISTS task_class_floors(
                task_class TEXT PRIMARY KEY, min_tier INTEGER NOT NULL,
                cooldown_until_ms INTEGER NOT NULL, canary_passes INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS floor_raisers(
+               task_class TEXT NOT NULL, harness TEXT NOT NULL, model TEXT NOT NULL,
+               demoted_until_ms INTEGER NOT NULL, PRIMARY KEY(task_class, harness, model));
              CREATE TABLE IF NOT EXISTS model_versions(
                harness TEXT NOT NULL, model TEXT NOT NULL, version TEXT NOT NULL, first_seen INTEGER NOT NULL,
                PRIMARY KEY(harness, model, version));
@@ -277,10 +284,9 @@ fn record_in(
     };
     let earlier_review_rejects: i64 = tx.query_row(
         "SELECT COUNT(*) FROM model_outcomes
-         WHERE task_id=?1 AND task_class=?2 AND harness=?3 AND model=?4 AND result=?5",
+         WHERE task_id=?1 AND harness=?2 AND model=?3 AND result=?4",
         params![
             outcome.task_id,
-            class,
             model.harness,
             model.model,
             FailureKind::SubstantiveReviewReject.as_str()
@@ -315,52 +321,101 @@ fn record_in(
         ],
     )?;
 
+    // A probe is clean only if it passed and review never sent the task back.
+    let probe = match recorded.attribution {
+        Attribution::Success if earlier_review_rejects == 0 => Probe::Clean,
+        Attribution::Excluded => Probe::Unknown,
+        _ => Probe::NotClean,
+    };
+    let canary = outcome.canary.then_some(probe);
     let failed = match recorded.attribution {
-        Attribution::Success => false,
-        Attribution::ReasoningInadequacy => true,
-        Attribution::ContextOverload | Attribution::Excluded | Attribution::BelowThreshold => {
+        Attribution::Success => Some(false),
+        Attribution::ReasoningInadequacy => Some(true),
+        Attribution::ContextOverload | Attribution::Excluded | Attribution::BelowThreshold => None,
+    };
+    let mut demoted = false;
+    if let Some(failed) = failed {
+        let mut state = load_fit(tx, class, model)?
+            .map(|(state, updated_at)| decayed(state, updated_at, now_ms))
+            .unwrap_or_else(|| FitState::new(outcome.tier));
+        if state.is_demoted(now_ms) {
+            // Late results from work already running are not evidence: the next
+            // demotion needs attempts made after this one ends.
+            if canary == Some(Probe::NotClean) {
+                apply_canary(tx, class, outcome.tier, Probe::NotClean)?;
+            }
             return Ok(recorded);
         }
-    };
+        state.tier = outcome.tier;
+        state.trials = state
+            .trials
+            .saturating_add(1)
+            .min(recent_trials(tx, class, model, now_ms)?);
+        let alpha = EWMA_ALPHA.max(1.0 / f64::from(state.trials));
+        let sample = if failed { 1.0 } else { 0.0 };
+        state.ewma_fail_rate += alpha * (sample - state.ewma_fail_rate);
+        state.consecutive_failures = if failed {
+            state.consecutive_failures.saturating_add(1)
+        } else {
+            0
+        };
 
-    let mut state = load_fit(tx, class, model)?
-        .map(|(state, updated_at)| decayed(state, updated_at, now_ms))
-        .unwrap_or_else(|| FitState::new(outcome.tier));
-    state.tier = outcome.tier;
-    state.trials = state.trials.saturating_add(1);
-    let alpha = EWMA_ALPHA.max(1.0 / f64::from(state.trials));
-    let sample = if failed { 1.0 } else { 0.0 };
-    state.ewma_fail_rate += alpha * (sample - state.ewma_fail_rate);
-    state.consecutive_failures = if failed {
-        state.consecutive_failures.saturating_add(1)
-    } else {
-        0
-    };
-
-    let demote = failed
-        && !state.is_demoted(now_ms)
-        && (state.consecutive_failures >= DEMOTE_CONSECUTIVE
-            || (state.trials >= DEMOTE_MIN_TRIALS && state.ewma_fail_rate >= DEMOTE_FAIL_RATE));
-    if demote {
-        state.demoted_until_ms = now_ms.saturating_add(demotion_ms(state.demotion_level));
-        state.demotion_level = state.demotion_level.saturating_add(1);
-        // The next demotion needs fresh evidence.
-        state.trials = 0;
-        state.ewma_fail_rate = 0.0;
-        state.consecutive_failures = 0;
-        recorded.demoted_until_ms = Some(state.demoted_until_ms);
+        demoted = failed
+            && (state.consecutive_failures >= DEMOTE_CONSECUTIVE
+                || (state.trials >= DEMOTE_MIN_TRIALS && state.ewma_fail_rate >= DEMOTE_FAIL_RATE));
+        if demoted {
+            state.demoted_until_ms = now_ms.saturating_add(demotion_ms(state.demotion_level));
+            state.demotion_level = state.demotion_level.saturating_add(1);
+            // The next demotion needs fresh evidence.
+            state.trials = 0;
+            state.ewma_fail_rate = 0.0;
+            state.consecutive_failures = 0;
+            recorded.demoted_until_ms = Some(state.demoted_until_ms);
+        }
+        save_fit(tx, class, model, &state, now_ms)?;
     }
-    save_fit(tx, class, model, &state, now_ms)?;
 
-    if demote {
-        recorded.floor_moved_to = raise_floor(tx, class, state.tier, now_ms)?;
+    if demoted {
+        recorded.floor_moved_to = raise_floor(tx, class, outcome.tier, now_ms)?;
     }
-    if outcome.canary
-        && let Some(lowered) = apply_canary(tx, class, outcome.tier, failed)?
+    if let Some(probe) = canary
+        && let Some(lowered) = apply_canary(tx, class, outcome.tier, probe)?
     {
         recorded.floor_moved_to = Some(lowered);
     }
     Ok(recorded)
+}
+
+/// What a canary attempt showed about the tier below the floor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    Clean,
+    /// Breaks the run of clean passes, whether or not it counts against the model.
+    NotClean,
+    /// An infrastructure failure: says nothing.
+    Unknown,
+}
+
+/// Counted trials logged within the last half-life.
+fn recent_trials(
+    db: &Connection,
+    class: &str,
+    model: &ModelKey,
+    now_ms: i64,
+) -> rusqlite::Result<u32> {
+    db.query_row(
+        "SELECT COUNT(*) FROM model_outcomes
+         WHERE task_class=?1 AND harness=?2 AND model=?3 AND at>=?4 AND attribution IN (?5, ?6)",
+        params![
+            class,
+            model.harness,
+            model.model,
+            now_ms.saturating_sub(HALF_LIFE_MS),
+            Attribution::Success.as_str(),
+            Attribution::ReasoningInadequacy.as_str()
+        ],
+        |r| r.get(0),
+    )
 }
 
 /// With enough demoted models at `tier`, put the class's floor above it.
@@ -390,6 +445,14 @@ fn raise_floor(
     floor.cooldown_until_ms = floor.cooldown_until_ms.max(latest.unwrap_or(now_ms));
     floor.canary_passes = 0;
     save_floor(tx, class, &floor)?;
+    // Remember whose demotions set the cooldown, so that shortening one of them
+    // can shorten it too.
+    tx.execute(
+        "INSERT OR REPLACE INTO floor_raisers(task_class,harness,model,demoted_until_ms)
+         SELECT task_class,harness,model,demoted_until_ms FROM model_fit_aggregates
+         WHERE task_class=?1 AND tier=?2 AND demoted_until_ms>?3",
+        params![class, tier_number(tier), now_ms],
+    )?;
     Ok(moved.then_some(above))
 }
 
@@ -399,21 +462,23 @@ fn apply_canary(
     tx: &Transaction<'_>,
     class: &str,
     tier: ModelTier,
-    failed: bool,
+    probe: Probe,
 ) -> rusqlite::Result<Option<ModelTier>> {
     let mut floor = load_floor(tx, class)?;
     if tier_below(floor.min_tier) != Some(tier) {
         return Ok(None);
     }
     let mut lowered = None;
-    if failed {
-        floor.canary_passes = 0;
-    } else {
-        floor.canary_passes += 1;
-        if floor.canary_passes >= CANARY_PASSES_TO_DEESCALATE {
-            floor.min_tier = tier;
-            floor.canary_passes = 0;
-            lowered = Some(tier);
+    match probe {
+        Probe::Unknown => return Ok(None),
+        Probe::NotClean => floor.canary_passes = 0,
+        Probe::Clean => {
+            floor.canary_passes += 1;
+            if floor.canary_passes >= CANARY_PASSES_TO_DEESCALATE {
+                floor.min_tier = tier;
+                floor.canary_passes = 0;
+                lowered = Some(tier);
+            }
         }
     }
     save_floor(tx, class, &floor)?;
@@ -462,7 +527,41 @@ fn observe_version_in(
         }
         save_fit(tx, &class, model, &state, now_ms)?;
     }
+    shorten_floor_cooldowns(tx, model, now_ms)?;
     Ok(true)
+}
+
+/// Halve what is left of the demotions this model contributed to floor
+/// cooldowns. Each affected cooldown then ends with the last of its raisers'
+/// demotions, or now if none of them is still running. It is never extended.
+fn shorten_floor_cooldowns(
+    tx: &Transaction<'_>,
+    model: &ModelKey,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    let classes: Vec<String> = tx
+        .prepare(
+            "SELECT task_class FROM floor_raisers
+             WHERE harness=?1 AND model=?2 AND demoted_until_ms>?3",
+        )?
+        .query_map(params![model.harness, model.model, now_ms], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    for class in classes {
+        tx.execute(
+            "UPDATE floor_raisers SET demoted_until_ms=?4+(demoted_until_ms-?4)/2
+             WHERE task_class=?1 AND harness=?2 AND model=?3",
+            params![class, model.harness, model.model, now_ms],
+        )?;
+        let last: i64 = tx.query_row(
+            "SELECT MAX(demoted_until_ms) FROM floor_raisers WHERE task_class=?1",
+            [&class],
+            |r| r.get(0),
+        )?;
+        let mut floor = load_floor(tx, &class)?;
+        floor.cooldown_until_ms = floor.cooldown_until_ms.min(last.max(now_ms));
+        save_floor(tx, &class, &floor)?;
+    }
+    Ok(())
 }
 
 fn demotion_ms(level: u32) -> i64 {
@@ -471,10 +570,15 @@ fn demotion_ms(level: u32) -> i64 {
         .min(DEMOTION_MAX_MS)
 }
 
-/// Apply the half-life to the failure rate stored at `updated_at`.
+/// Age state stored at `updated_at`: apply the half-life to the failure rate,
+/// and drop trials and a streak once all their evidence is older than it.
 fn decayed(mut state: FitState, updated_at: i64, now_ms: i64) -> FitState {
     let elapsed = now_ms.saturating_sub(updated_at).max(0);
     state.ewma_fail_rate *= 0.5_f64.powf(elapsed as f64 / HALF_LIFE_MS as f64);
+    if elapsed > HALF_LIFE_MS {
+        state.trials = 0;
+        state.consecutive_failures = 0;
+    }
     state
 }
 

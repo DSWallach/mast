@@ -89,6 +89,20 @@ fn domain_comes_from_the_hardest_path() {
         ),
         (vec!["crates/enginex/a.rs"], TaskDomain::MechanicalRefactor),
         (vec![], TaskDomain::MechanicalRefactor),
+        (vec!["**"], TaskDomain::EngineConcurrencyState),
+        (vec!["crates/**"], TaskDomain::EngineConcurrencyState),
+        (vec!["crates/*/src/**"], TaskDomain::EngineConcurrencyState),
+        (
+            vec!["crates/{ui,mcp}/**"],
+            TaskDomain::EngineConcurrencyState,
+        ),
+        (vec!["crates/ui/**"], TaskDomain::UiGpui),
+        (vec!["crates/ui*/**"], TaskDomain::UiGpui),
+        (vec!["crates/pro*"], TaskDomain::ProtoOrDocSchema),
+        (vec!["apps/**"], TaskDomain::UiGpui),
+        (vec!["crates/syntax/**"], TaskDomain::MechanicalRefactor),
+        (vec!["docs/**"], TaskDomain::DocsConfig),
+        (vec!["**/*.md"], TaskDomain::DocsConfig),
     ] {
         assert_eq!(classify_domain(&paths), domain, "{paths:?}");
     }
@@ -156,10 +170,15 @@ fn context_overload_does_not_demote() {
 #[test]
 fn context_ceiling_depends_on_the_tier() {
     let at = |tier, peak| context_overloaded(tier, Some(peak), Some(100_000));
-    assert!(!at(ModelTier::Small, 59_000));
-    assert!(at(ModelTier::Small, 61_000));
-    assert!(!at(ModelTier::Medium, 61_000));
-    assert!(at(ModelTier::Medium, 79_000));
+    for (tier, ceiling) in [
+        (ModelTier::Small, 60_000),
+        (ModelTier::Medium, 78_000),
+        (ModelTier::Large, 78_000),
+    ] {
+        assert!(!at(tier, ceiling - 1), "{tier:?}");
+        assert!(!at(tier, ceiling), "{tier:?}");
+        assert!(at(tier, ceiling + 1), "{tier:?}");
+    }
     assert!(!context_overloaded(ModelTier::Small, None, Some(100_000)));
     assert!(!context_overloaded(ModelTier::Small, Some(99_000), None));
     assert!(!context_overloaded(ModelTier::Small, Some(99_000), Some(0)));
@@ -182,6 +201,115 @@ fn review_rejects_count_from_the_second_on_the_same_task() {
     assert_eq!(reject("2", "b"), Attribution::BelowThreshold);
     assert_eq!(reject("3", "a"), Attribution::ReasoningInadequacy);
     assert_eq!(fit(&ledger, "haiku", T0).trials, 1);
+}
+
+#[test]
+fn review_rejects_count_across_a_change_of_task_class() {
+    let (_dir, ledger) = ledger();
+    let mut reject = outcome(
+        "1",
+        "haiku",
+        ModelTier::Small,
+        TaskResult::Failed(FailureKind::SubstantiveReviewReject),
+    );
+    reject.task_id = "a".into();
+    let first = ledger.record(&reject, T0).unwrap();
+    assert_eq!(first.attribution, Attribution::BelowThreshold);
+    // The fix touched the wire types, so the task is now classed differently.
+    reject.outcome_id = "2".into();
+    reject.task_class.domain = TaskDomain::ProtoOrDocSchema;
+    let second = ledger.record(&reject, T0).unwrap();
+    assert_eq!(second.attribution, Attribution::ReasoningInadequacy);
+}
+
+#[test]
+fn a_failure_rate_just_under_the_threshold_does_not_demote() {
+    // Passes, then failures that are never consecutive. The last failure takes
+    // the rate to 0.3 + 0.7 * previous.
+    let rate_after = |passes: usize| {
+        let (_dir, ledger) = ledger();
+        small(&ledger, "f0", "haiku", FAILED, T0);
+        for index in 0..passes {
+            small(&ledger, &format!("p{index}"), "haiku", PASS, T0);
+        }
+        let before = fit(&ledger, "haiku", T0);
+        assert!(!before.is_demoted(T0));
+        let last = small(&ledger, "f1", "haiku", FAILED, T0);
+        (before, last, fit(&ledger, "haiku", T0))
+    };
+    // After three passes the rate is 0.2333; the failure makes it 0.4633.
+    let (before, last, _) = rate_after(3);
+    assert!((before.ewma_fail_rate - 0.7 / 3.0).abs() < 1e-9);
+    assert!(last.demoted_until_ms.is_some());
+    // A fourth pass leaves 0.1633; the failure makes it only 0.4143.
+    let (before, last, after) = rate_after(4);
+    assert!((before.ewma_fail_rate - 0.49 / 3.0).abs() < 1e-9);
+    assert_eq!(last.demoted_until_ms, None);
+    assert!((after.ewma_fail_rate - (0.3 + 0.7 * 0.49 / 3.0)).abs() < 1e-9);
+}
+
+#[test]
+fn two_trials_are_too_few_to_demote_on_rate() {
+    let (_dir, ledger) = ledger();
+    small(&ledger, "1", "haiku", PASS, T0);
+    let second = small(&ledger, "2", "haiku", FAILED, T0);
+    assert_eq!(second.demoted_until_ms, None);
+    let state = fit(&ledger, "haiku", T0);
+    assert_eq!(state.trials, 2);
+    assert_eq!(state.ewma_fail_rate, 0.5);
+}
+
+#[test]
+fn old_failures_are_not_a_streak() {
+    let (_dir, ledger) = ledger();
+    small(&ledger, "1", "haiku", FAILED, T0);
+    let later = T0 + 140 * DAY;
+    assert_eq!(fit(&ledger, "haiku", later).trials, 0);
+    assert_eq!(fit(&ledger, "haiku", later).consecutive_failures, 0);
+    let second = small(&ledger, "2", "haiku", FAILED, later);
+    assert_eq!(second.demoted_until_ms, None);
+    let state = fit(&ledger, "haiku", later);
+    assert_eq!((state.trials, state.consecutive_failures), (1, 1));
+}
+
+#[test]
+fn a_streak_lasts_one_half_life() {
+    let (_dir, ledger) = ledger();
+    small(&ledger, "1", "haiku", FAILED, T0);
+    let inside = small(&ledger, "2", "haiku", FAILED, T0 + 14 * DAY);
+    assert!(inside.demoted_until_ms.is_some());
+    small(&ledger, "3", "flash", FAILED, T0);
+    let outside = small(&ledger, "4", "flash", FAILED, T0 + 14 * DAY + 1);
+    assert_eq!(outside.demoted_until_ms, None);
+}
+
+#[test]
+fn only_recent_trials_count_towards_the_rate_rule() {
+    let (_dir, ledger) = ledger();
+    // Never more than a half-life apart, so the history is never dropped whole.
+    for index in 0..4 {
+        small(&ledger, &format!("p{index}"), "haiku", PASS, T0);
+    }
+    small(&ledger, "p4", "haiku", PASS, T0 + 10 * DAY);
+    small(&ledger, "f", "haiku", FAILED, T0 + 20 * DAY);
+    assert_eq!(fit(&ledger, "haiku", T0 + 20 * DAY).trials, 2);
+}
+
+#[test]
+fn late_results_during_a_demotion_are_not_evidence() {
+    let (_dir, ledger) = ledger();
+    small(&ledger, "1", "haiku", FAILED, T0);
+    small(&ledger, "2", "haiku", FAILED, T0);
+    for id in ["3", "4", "5"] {
+        let late = small(&ledger, id, "haiku", FAILED, T0 + 6 * DAY);
+        assert_eq!(late.demoted_until_ms, None);
+    }
+    let after = T0 + 7 * DAY;
+    assert_eq!(
+        small(&ledger, "6", "haiku", FAILED, after).demoted_until_ms,
+        None
+    );
+    assert_eq!(fit(&ledger, "haiku", after).trials, 1);
 }
 
 #[test]
@@ -276,6 +404,35 @@ fn expired_demotions_do_not_raise_the_floor() {
 }
 
 #[test]
+fn one_demotion_at_each_of_two_tiers_does_not_raise_the_floor() {
+    let (_dir, ledger) = ledger();
+    small(&ledger, "1", "haiku", FAILED, T0);
+    small(&ledger, "2", "haiku", FAILED, T0);
+    for id in ["3", "4"] {
+        ledger
+            .record(&outcome(id, "sonnet", ModelTier::Medium, FAILED), T0)
+            .unwrap();
+    }
+    assert_eq!(ledger.floor(&class()).unwrap(), FloorState::default());
+}
+
+#[test]
+fn two_demoted_medium_models_raise_the_floor_to_large() {
+    let (_dir, ledger) = ledger();
+    raise_floor_to_medium(&ledger);
+    let mut moved = Vec::new();
+    for name in ["sonnet", "codex"] {
+        for attempt in ["1", "2"] {
+            let id = format!("{name}-{attempt}");
+            let failed = outcome(&id, name, ModelTier::Medium, FAILED);
+            moved.extend(ledger.record(&failed, T0).unwrap().floor_moved_to);
+        }
+    }
+    assert_eq!(moved, [ModelTier::Large]);
+    assert_eq!(ledger.floor(&class()).unwrap().min_tier, ModelTier::Large);
+}
+
+#[test]
 fn failure_rate_halves_every_fourteen_days() {
     let (_dir, ledger) = ledger();
     small(&ledger, "1", "haiku", FAILED, T0);
@@ -318,6 +475,43 @@ fn a_new_version_halves_evidence_and_remaining_demotion_once() {
     assert_eq!(flash.demotion_level, 0);
 }
 
+#[test]
+fn a_version_reset_shortens_the_floor_cooldown_with_the_demotions() {
+    let (_dir, ledger) = ledger();
+    raise_floor_to_medium(&ledger);
+    let cooldown = || ledger.floor(&class()).unwrap().cooldown_until_ms;
+    for name in ["haiku", "flash"] {
+        ledger.observe_version(&model(name), "1.0", T0).unwrap();
+    }
+    let bumped = T0 + DAY;
+    ledger
+        .observe_version(&model("haiku"), "2.0", bumped)
+        .unwrap();
+    // The other raiser is still demoted until day 7.
+    assert_eq!(cooldown(), T0 + 7 * DAY);
+    ledger
+        .observe_version(&model("flash"), "2.0", bumped)
+        .unwrap();
+    assert_eq!(cooldown(), T0 + 4 * DAY);
+    assert_eq!(fit(&ledger, "haiku", bumped).demoted_until_ms, T0 + 4 * DAY);
+    assert_eq!(ledger.floor(&class()).unwrap().min_tier, ModelTier::Medium);
+}
+
+#[test]
+fn a_cooldown_with_no_running_demotion_left_ends_at_once() {
+    let (_dir, ledger) = ledger();
+    raise_floor_to_medium(&ledger);
+    for name in ["haiku", "flash"] {
+        ledger.observe_version(&model(name), "1.0", T0).unwrap();
+    }
+    // One millisecond of each demotion is left, and half of it rounds to none.
+    let bumped = T0 + 7 * DAY - 1;
+    for name in ["haiku", "flash"] {
+        ledger.observe_version(&model(name), "2.0", bumped).unwrap();
+    }
+    assert_eq!(ledger.floor(&class()).unwrap().cooldown_until_ms, bumped);
+}
+
 fn canary(ledger: &ModelFitLedger, id: &str, result: TaskResult) -> Recorded {
     let mut probe = outcome(id, "mini", ModelTier::Small, result);
     probe.canary = true;
@@ -354,6 +548,60 @@ fn a_failed_canary_restarts_the_count() {
     let floor = ledger.floor(&class()).unwrap();
     assert_eq!(floor.min_tier, ModelTier::Medium);
     assert_eq!(floor.canary_passes, 1);
+}
+
+#[test]
+fn a_canary_that_is_not_clean_restarts_the_count() {
+    let overloaded = {
+        let mut probe = outcome("bad", "mini", ModelTier::Small, FAILED);
+        probe.peak_context_tokens = Some(150_000);
+        (probe, Attribution::ContextOverload)
+    };
+    let first_reject = (
+        outcome(
+            "bad",
+            "mini",
+            ModelTier::Small,
+            TaskResult::Failed(FailureKind::SubstantiveReviewReject),
+        ),
+        Attribution::BelowThreshold,
+    );
+    for (mut probe, attribution) in [overloaded, first_reject] {
+        let (_dir, ledger) = ledger();
+        raise_floor_to_medium(&ledger);
+        canary(&ledger, "c1", PASS);
+        probe.canary = true;
+        let recorded = ledger.record(&probe, T0 + 8 * DAY).unwrap();
+        assert_eq!(recorded.attribution, attribution);
+        assert_eq!(ledger.floor(&class()).unwrap().canary_passes, 0);
+        assert_eq!(canary(&ledger, "c2", PASS).floor_moved_to, None);
+        assert_eq!(ledger.floor(&class()).unwrap().min_tier, ModelTier::Medium);
+    }
+}
+
+#[test]
+fn a_pass_after_a_review_reject_is_not_a_clean_canary() {
+    let (_dir, ledger) = ledger();
+    raise_floor_to_medium(&ledger);
+    let at = T0 + 8 * DAY;
+    let mut attempt = outcome(
+        "reject",
+        "mini",
+        ModelTier::Small,
+        TaskResult::Failed(FailureKind::SubstantiveReviewReject),
+    );
+    attempt.task_id = "a".into();
+    ledger.record(&attempt, at).unwrap();
+    canary(&ledger, "c1", PASS);
+    attempt.outcome_id = "fixed".into();
+    attempt.result = PASS;
+    attempt.canary = true;
+    assert_eq!(ledger.record(&attempt, at).unwrap().floor_moved_to, None);
+    let floor = ledger.floor(&class()).unwrap();
+    assert_eq!(
+        (floor.min_tier, floor.canary_passes),
+        (ModelTier::Medium, 0)
+    );
 }
 
 #[test]
@@ -510,6 +758,23 @@ fn router_picks_the_cheapest_tier_then_cost_in_any_order() {
     );
     // The smallest floor has nothing below it to probe.
     assert_eq!(rig.rolls.get(), 0);
+}
+
+#[test]
+fn router_breaks_a_price_tie_by_model_in_either_order() {
+    let mut rig = rig(0.99);
+    let mut offered = vec![
+        candidate("zeta", ModelTier::Small, 5),
+        candidate("alpha", ModelTier::Small, 5),
+    ];
+    for _ in 0..2 {
+        let chosen = rig
+            .router
+            .select(&request(), &offered, &Quota::default())
+            .unwrap();
+        assert_eq!(chosen.model, model("alpha"));
+        offered.reverse();
+    }
 }
 
 #[test]
