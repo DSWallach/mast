@@ -19,14 +19,20 @@ message. Repository hooks do not run.
 - `list` and `prune` cover `refs/mast/wip/` refs that carry the metadata. Nothing prunes
   automatically yet.
 - Not saved: ignored untracked files, an index-only version of a file that was edited again
-  after staging, and the files inside a submodule or nested repository.
+  after staging, the files inside a submodule or nested repository, and a merge or rebase in
+  progress (conflicted files keep their markers; `MERGE_HEAD` and rebase state are lost).
+- A save that writes nothing keeps the earlier record, so chat, account, model, reason, note
+  and time describe the stall that first saved this state, not necessarily the latest one.
+- Limits (`Limits::default`): 60 s for the whole save, after which git and its helpers are
+  killed; at most 5,000 untracked files and 256 MiB of them. Hitting one saves no ref.
+- `restore` needs an absolute folder and resets to the commit's real parent.
 - Untracked files that are not ignored are saved, whatever they hold. The ref is local.
 
 ## Fallback order
 
-1. Another signed-in managed account of the same harness (Claude Code, Codex) with
-   headroom above zero for the model that hit the limit. The successor chat is pinned to it
-   before launch.
+1. Another login of the same harness (Claude Code, Codex) with headroom above zero for
+   the model that hit the limit: a signed-in managed account, or the Default login when its
+   headroom is known. The successor chat is pinned to it before launch.
 2. Per-model Claude limits only: one model down in place, unless the account's headroom for
    that model is known to be zero or less.
 3. Another harness: the highest known headroom (its Default login or a managed account),
@@ -35,8 +41,10 @@ message. Repository hooks do not run.
 
 A lineage never returns to an account of the current harness it already ran on, nor to
 another harness it already used. Before a successor starts, the stalled chat's worktree
-(its selected bound worktree, else its execution root) is checkpointed once and the commit
-is named in the successor's prompt. A failed checkpoint does not block the successor. A
+(the worktree the agent bound last that still exists, else its execution root; the Changes
+pane's selection is ignored) is checkpointed once, and the commit and checkout path are
+named in the successor's prompt. Re-binding an earlier worktree does not make it the latest.
+A failed or over-limit checkpoint is recorded as `none` and does not block the successor. A
 repository rooted at the home folder is never checkpointed. Manager fallback chains are
 unchanged.
 
@@ -59,5 +67,9 @@ calls it yet.
 - The `swap_worker` tool and the `reusable_chat` account/model pin fix.
 - Hydrating checkpoints into `AutomaticHandoff`.
 - A successor, including one on another account of the same harness, starts on the default
-  model: `create_credit_successor` clears the model. Keeping the stalled chat's model needs
-  a change in `work_outline_launch.rs`.
+  model: `create_credit_successor` clears the model, reasoning level and model options.
+  Keeping them needs a change in `work_outline_launch.rs`. Before a quota source is wired,
+  fix this together with what headroom is judged on: step 1 asks about the stalled model and
+  step 3 about the harness default model, and either may differ from the model launch uses.
+  Step 3 also judges "unknown" on the Default login, while a successor chosen that way is
+  not pinned and runs on the project's default account.

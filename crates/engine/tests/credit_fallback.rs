@@ -332,11 +332,74 @@ async fn a_successor_is_told_where_the_stalled_worktree_was_saved() {
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].meta.item_id, derive_id("item-w", roles::ITEM));
     assert_eq!((saved[0].meta.chat_id.as_str(), saved[0].meta.reason.as_str()), (stalled.as_str(), "usage_limit"));
-    let told = format!("as commit {} under refs/mast/wip", saved[0].commit);
+    let repo = root.join("repo").display().to_string();
+    let told = format!("checkout at {repo} was saved when it stopped, uncommitted and untracked files included, as commit {} ",
+        saved[0].commit);
     assert!(rig.runs.lock().unwrap().iter().any(|(_, _, prompt)| prompt.contains(&told)));
-    assert!(rig.core.workspace.ledger_holds(&format!(
-        "work-outline:credit-fallback:{stalled}:{}:checkpoint:{}",
-        entry_of(&ledger_entry(&rig, &stalled).unwrap()), saved[0].commit)));
+    assert!(record_holds(&rig, &stalled, &format!("checkpoint:{}:{repo}", saved[0].commit)));
+}
+
+#[tokio::test]
+async fn a_checkout_too_big_to_save_still_gets_a_successor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let all = [HarnessId::ClaudeCode, HarnessId::Codex];
+    let rig = host(&root, &all, limits(|harness, _| (harness == HarnessId::Codex).then_some("usage_limit")), true).await;
+    let bulk = root.join("repo/bulk");
+    std::fs::create_dir_all(&bulk).unwrap();
+    let cap = mast_engine::task_checkpoint::Limits::default().max_untracked_files;
+    for index in 0..=cap {
+        std::fs::write(bulk.join(index.to_string()), "").unwrap();
+    }
+    let stalled = worker(&rig, HarnessId::Codex, "gpt-5").await;
+    until("the successor's run", || rig.runs.lock().unwrap().iter()
+        .any(|(_, _, prompt)| prompt.contains(&format!("Chat {stalled} was working")))).await;
+    settle().await;
+
+    assert!(record_holds(&rig, &stalled, "checkpoint:none"));
+    assert_eq!(mast_engine::task_checkpoint::list(&root.join("repo")).unwrap(), Vec::new());
+    assert!(rig.runs.lock().unwrap().iter().all(|(_, _, prompt)| !prompt.contains("refs/mast/wip")));
+}
+
+/// No quota source is wired, so the account decision is recorded by hand and the
+/// running host applies it, as it would replay its own.
+#[tokio::test]
+async fn an_account_switch_pins_the_successor_to_that_account_through_a_retry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let all = [HarnessId::ClaudeCode];
+    let rule = || limits(|_, model| model.is_some_and(|m| m.contains("opus")).then_some("usage_weekly"));
+    let first = host(&root, &all, rule(), true).await;
+    let chosen = first.core.managed_accounts.create(HarnessId::ClaudeCode, "Chosen").unwrap().id;
+    let default = first.core.managed_accounts.create(HarnessId::ClaudeCode, "Project default").unwrap().id;
+    first.core.managed_accounts.set_project_account(SPACE, HarnessId::ClaudeCode, Some(&default)).unwrap();
+    hold(&first, "credit_fallback_decide");
+    let stalled = worker(&first, HarnessId::ClaudeCode, OPUS).await;
+    until("the errored run", || first.core.sessions.errored_limit_for_test(&stalled).is_some()).await;
+    settle().await;
+    let entry = first.core.sessions.errored_limit_for_test(&stalled).unwrap().0;
+    let base = format!("work-outline:credit-fallback:{stalled}:{entry}");
+    assert!(first.core.workspace.ledger_mark(&format!("{base}:decided:switch:claude-code:{chosen}")).unwrap());
+    first.core.shutdown().await;
+    drop(first);
+
+    // Held after the pin, before the launch: every attempt pins again.
+    let second = host(&root, &all, rule(), false).await;
+    hold(&second, "credit_fallback_successor");
+    let successor = derive_id(&derive_id(&format!("{stalled}:{entry}"), "credit-fallback-successor"), roles::CHAT);
+    let pin = |rig: &Rig| rig.core.managed_accounts.chat_pin(&successor, HarnessId::ClaudeCode);
+    until("the pin", || pin(&second).is_some()).await;
+    settle().await;
+    assert_eq!(pin(&second).as_deref(), Some(chosen.as_str()));
+    assert_eq!(children_of_manager(&second), vec![stalled.clone()], "held before the launch");
+
+    release(&second);
+    until("the successor's run", || second.runs.lock().unwrap().iter()
+        .any(|(_, _, prompt)| prompt.contains(&format!("Chat {stalled} was working")))).await;
+    settle().await;
+    assert_eq!(children_of_manager(&second).len(), 2, "one successor");
+    assert!(children_of_manager(&second).contains(&successor));
+    assert_eq!(pin(&second).as_deref(), Some(chosen.as_str()), "not the project's default account");
 }
 
 fn record_holds(rig: &Rig, chat: &str, step: &str) -> bool {
