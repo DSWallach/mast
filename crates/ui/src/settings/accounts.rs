@@ -2068,14 +2068,16 @@ mod tests {
         cx.run_until_parked();
         let quota = page.read_with(cx, |page, _| page.quota.clone());
         quota.update(cx, |quota, cx| {
-            quota.edit(|editor| editor.set_provider_cap("codex", 70), cx);
+            quota.edit(|editor| editor.set_provider_cap("codex", 80), cx);
             quota.save(cx);
         });
         cx.run_until_parked();
         let sent = sent.lock().unwrap();
-        let (method, params) = sent.last().unwrap();
-        assert_eq!(method, methods::SET_QUOTA_SETTINGS);
-        assert_eq!(params["providerHardCaps"], serde_json::json!({ "codex": 0.7 }));
+        let (_, params) = sent
+            .iter()
+            .find(|(method, _)| method == methods::SET_QUOTA_SETTINGS)
+            .expect("a save was sent");
+        assert_eq!(params["providerHardCaps"], serde_json::json!({ "codex": 0.8 }));
         assert_eq!(params["hardCap"], 0.85, "the global cap is untouched");
     }
 

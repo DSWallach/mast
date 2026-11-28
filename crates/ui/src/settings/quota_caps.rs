@@ -1001,8 +1001,8 @@ mod tests {
         for (id, _, _) in PROVIDERS {
             assert_eq!(percent_label(editor.provider_cap(id)), "85%");
         }
-        editor.set_provider_cap("codex", 70);
-        assert_eq!(editor.draft.provider_hard_caps["codex"], 0.70);
+        editor.set_provider_cap("codex", 80);
+        assert_eq!(editor.draft.provider_hard_caps["codex"], 0.80);
         assert_eq!(percent_label(editor.provider_cap("claude-code")), "85%");
         assert!(editor.can_save());
         // Past either end of the slider is clamped, never saved out of range.
