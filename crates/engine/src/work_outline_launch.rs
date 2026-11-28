@@ -832,7 +832,8 @@ impl WorkItemLaunchService {
             standing_role: None,
         };
         let mut request = self.handoff_successor_request(&request, stalled)?;
-        // A successor on another harness never inherits the stalled chat's pin.
+        // The stalled chat's account pin is always dropped, on its own harness
+        // too: a successor never inherits it.
         request.account_id = None;
         self.create_chat_for_work_item(&request).await
     }
@@ -2990,11 +2991,9 @@ mod credit_successor_tests {
 
         async fn run(
             &self, _request: RunRequest, _controls: RunControls,
-        ) -> Result<BoxStream<'static, AgentEvent>, HarnessError> {
-            let done = AgentEvent::Done {
-                status: DoneStatus::Completed, session_id: None, result: None, errors: vec![], error_code: None,
-            };
-            Ok(futures::stream::iter([done]).boxed())
+        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+            let done = AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: None };
+            Ok(futures::stream::iter([Ok(done)]).boxed())
         }
     }
 
