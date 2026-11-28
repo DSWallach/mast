@@ -577,6 +577,9 @@ impl Runner<'_> {
     }
 
     fn save_tree(&mut self, name: &str) {
+        if self.session.is_none() {
+            return;
+        }
         let frame = self.session().frame();
         let text = format!("{}\n# regions without an a11y node\n{}", frame.render(), frame.render_selectors());
         let path = self.out.join(name);
