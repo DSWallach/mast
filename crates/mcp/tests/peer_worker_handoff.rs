@@ -460,7 +460,12 @@ async fn an_ask_ceiling_peer_cannot_approve_a_workers_command_via_respond_to_inp
             if let Some(req_id) = info.pointer("/pendingInput/requestId").and_then(Value::as_str).filter(|id| !id.is_empty())
                 && previous != Some(req_id)
             {
-                return req_id.to_string();
+                // get_chat reports a peer's live request; respond_to_input answers from the transcript,
+                // which records the same request a moment later. Hand it back only once both agree.
+                let transcript = tools.call("read_chat", json!({ "chat": worker })).await.unwrap();
+                if transcript.pointer("/pendingInput/requestId").and_then(Value::as_str) == Some(req_id) {
+                    return req_id.to_string();
+                }
             }
             assert!(tokio::time::Instant::now() < deadline, "timed out waiting for pendingInput (after {previous:?}): {info}");
             tokio::time::sleep(Duration::from_millis(50)).await;
