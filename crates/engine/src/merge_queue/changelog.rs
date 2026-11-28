@@ -55,11 +55,31 @@ fn is_unreleased_heading(line: &str) -> bool {
     })
 }
 
-/// Whether `text` already has the lines of `entry`, together.
-fn contains_entry(text: &str, entry: &str) -> bool {
-    let have: Vec<&str> = text.lines().map(str::trim_end).collect();
-    let want: Vec<&str> = entry.lines().collect();
-    !want.is_empty() && have.windows(want.len()).any(|window| window == want)
+/// The list entries of `text`, each normalized to a `- ` bullet with its
+/// continuation lines.
+fn entries(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in normalize_fragment(text).lines() {
+        match line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            Some(rest) => out.push(format!("- {rest}")),
+            None => {
+                if let Some(last) = out.last_mut() {
+                    last.push('\n');
+                    last.push_str(line);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The entries of `added` that `existing` does not already have, compared whole.
+fn new_entries(existing: &str, added: &str) -> Vec<String> {
+    let have = entries(existing);
+    entries(added)
+        .into_iter()
+        .filter(|entry| !have.contains(entry))
+        .collect()
 }
 
 /// A `[label]: url` line, the kind a changelog keeps at its end.
@@ -182,23 +202,22 @@ pub(super) fn fold(
     };
     if regular_file(worktree, CHANGELOG)? {
         let has_file = matches!(file, Ok(true));
-        let mut entries = Vec::new();
-        if has_file {
-            entries.push(normalize_fragment(&read_fragment_file()?));
+        let own = if has_file {
+            read_fragment_file()?
+        } else {
+            String::new()
+        };
+        let mut folded = entries(&own);
+        if let Some(sent) = &sent {
+            folded.extend(new_entries(&own, sent));
         }
-        if let Some(sent) = sent
-            && !entries.iter().any(|entry| contains_entry(entry, &sent))
-        {
-            entries.push(sent);
-        }
-        entries.retain(|entry| !entry.is_empty());
-        if entries.is_empty() {
+        if folded.is_empty() {
             return Ok(Vec::new());
         }
         let path = worktree.join(CHANGELOG);
         write(
             &path,
-            &fold_into_changelog(&read(&path)?, &entries.join("\n")),
+            &fold_into_changelog(&read(&path)?, &folded.join("\n")),
         )?;
         let mut changed = vec![PathBuf::from(CHANGELOG)];
         if has_file {
@@ -218,13 +237,14 @@ pub(super) fn fold(
     } else {
         String::new()
     };
-    if contains_entry(&text, &sent) {
+    let added = new_entries(&text, &sent);
+    if added.is_empty() {
         return Ok(Vec::new());
     }
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
-    text.push_str(&sent);
+    text.push_str(&added.join("\n"));
     text.push('\n');
     if text.len() > MAX_FRAGMENT_FILE_BYTES {
         return Err(refused(Path::new(&fragment_path), "would grow too large"));
@@ -308,6 +328,34 @@ mod tests {
         );
         let huge = "x".repeat(MAX_FRAGMENT_FILE_BYTES);
         assert!(fold(dir.path(), "item", Some(&huge)).is_err());
+    }
+
+    #[test]
+    fn duplicates_are_whole_entries_whatever_their_bullet() {
+        assert!(new_entries("Add two.\n", "- Add two.").is_empty());
+        assert!(new_entries("* Add two.\n", "Add two.").is_empty());
+        assert_eq!(new_entries("- A\n  more\n", "A"), ["- A"]);
+        assert_eq!(new_entries("- A\n- B\n", "- B\n- C"), ["- C"]);
+
+        // The branch's file and the same sent fragment make one entry.
+        for changelog in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("docs/changelog.d/item.md");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "Add two.\n").unwrap();
+            if changelog {
+                std::fs::write(dir.path().join(CHANGELOG), "## Unreleased\n").unwrap();
+            }
+            fold(dir.path(), "item", Some("- Add two.")).unwrap();
+            if changelog {
+                assert_eq!(
+                    std::fs::read_to_string(dir.path().join(CHANGELOG)).unwrap(),
+                    "## Unreleased\n\n- Add two.\n"
+                );
+            } else {
+                assert_eq!(std::fs::read_to_string(&file).unwrap(), "Add two.\n");
+            }
+        }
     }
 
     #[test]

@@ -649,10 +649,9 @@ fn a_cancelled_builds_folder_stays_until_the_build_ends() {
     f.assert_clean();
 }
 
-#[test]
-fn a_full_build_queue_is_retried_with_the_same_merge() {
-    let f = Fixture::new(&[]);
-    let fillers: Vec<String> = (0..4)
+/// Use up the owner chat's build quota; returns the jobs to cancel.
+fn fill_the_build_queue(f: &Fixture) -> Vec<String> {
+    (0..4)
         .map(|i| {
             f.builds
                 .enqueue(NewJob {
@@ -669,7 +668,13 @@ fn a_full_build_queue_is_retried_with_the_same_merge() {
                 .job
                 .id
         })
-        .collect();
+        .collect()
+}
+
+#[test]
+fn a_full_build_queue_is_retried_with_the_same_merge() {
+    let f = Fixture::new(&[]);
+    let fillers = fill_the_build_queue(&f);
     let sha = f.branch("one", &[("one.txt", "1\n")]);
     let request = f.queue.submit(f.request("item-1", &sha, None)).unwrap();
     f.queue.tick();
@@ -877,5 +882,98 @@ fn two_lands_of_one_item_keep_both_entries() {
         "- The feature.\n- A follow-up."
     );
     assert_eq!(f.queue.landings("item-1").unwrap().len(), 2);
+    f.assert_clean();
+}
+
+#[test]
+fn an_approval_of_a_replaced_merge_commit_does_not_land_the_new_one() {
+    let f = Fixture::new(&[]);
+    git(&f.repo, &["update-ref", LEAD_REF, &f.base]);
+    let fillers = fill_the_build_queue(&f);
+    let sha = f.branch("one", &[("one.txt", "1\n")]);
+    let other = f.branch("other", &[("other.txt", "2\n")]);
+    let request = f.queue.submit(f.request("item-1", &sha, None)).unwrap();
+    f.queue.tick();
+    let held = f.state(&request);
+    assert_eq!(held.state, LandState::Queued);
+    let first = held.candidate_sha.clone().unwrap();
+    f.queue
+        .record_verdict(&request.id, approve(&first))
+        .unwrap();
+
+    git(&f.repo, &["update-ref", LEAD_REF, &other]);
+    for id in fillers {
+        f.builds.cancel(&id, None).unwrap();
+    }
+    *f.builder.exit.lock().unwrap() = Some(0);
+    f.drive();
+    let rebuilt = f.state(&request);
+    assert_eq!(
+        rebuilt.state,
+        LandState::AwaitingReview,
+        "{:?}",
+        rebuilt.reason
+    );
+    assert_ne!(rebuilt.candidate_sha, Some(first.clone()));
+    assert_eq!(rebuilt.verdict, None);
+    assert_eq!(f.target(), Some(other));
+    assert!(
+        f.queue
+            .record_verdict(&request.id, approve(&first))
+            .is_err()
+    );
+    f.queue.cancel(&request.id, "done").unwrap();
+    f.assert_clean();
+}
+
+#[test]
+fn a_build_being_given_up_is_not_reused_when_the_target_moves_back() {
+    let f = Fixture::new(&[]);
+    git(&f.repo, &["update-ref", LEAD_REF, &f.base]);
+    let sha = f.branch("one", &[("one.txt", "1\n")]);
+    let other = f.branch("other", &[("other.txt", "2\n")]);
+    let request = f.queue.submit(f.request("item-1", &sha, None)).unwrap();
+    f.queue.tick();
+    f.builds.tick();
+    let old_job = f.state(&request).build_job_id.unwrap();
+    forget_the_enqueue(&f, &request.id);
+    git(&f.repo, &["update-ref", LEAD_REF, &other]);
+    f.queue.tick();
+
+    git(&f.repo, &["update-ref", LEAD_REF, &f.base]);
+    f.queue.tick();
+    let waiting = f.state(&request);
+    assert_eq!(waiting.state, LandState::Queued, "{:?}", waiting.reason);
+    assert!(waiting.reason.unwrap().contains("to stop"));
+
+    *f.builder.exit.lock().unwrap() = Some(1);
+    f.builds.tick();
+    *f.builder.exit.lock().unwrap() = None;
+    f.queue.tick();
+    let rebuilt = f.state(&request);
+    assert_eq!(rebuilt.state, LandState::Building, "{:?}", rebuilt.reason);
+    assert_ne!(rebuilt.build_job_id, Some(old_job));
+    f.queue.cancel(&request.id, "done").unwrap();
+    f.assert_clean();
+}
+
+#[test]
+fn a_forced_cancel_does_not_hide_a_landing_it_could_not_save() {
+    let f = Fixture::new(&[]);
+    let ready = ready_to_land(&f);
+    let candidate = ready.candidate_sha.clone().unwrap();
+    git(&f.repo, &["update-ref", LEAD_REF, &candidate]);
+    let db = rusqlite::Connection::open(f.root.join("queue/merge-queue.sqlite3")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER refuse BEFORE INSERT ON landings
+           BEGIN SELECT RAISE(ABORT, 'disk full'); END",
+    )
+    .unwrap();
+    let error = f.queue.force_cancel(&ready.id, "stuck").unwrap_err();
+    assert!(error.to_string().contains("disk full"), "{error}");
+    assert_eq!(f.state(&ready).state, LandState::AwaitingReview);
+    db.execute_batch("DROP TRIGGER refuse").unwrap();
+    let landed = f.queue.force_cancel(&ready.id, "stuck").unwrap();
+    assert_eq!(landed.state, LandState::Landed);
     f.assert_clean();
 }

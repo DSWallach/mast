@@ -222,6 +222,14 @@ pub struct LandRequest {
     /// The merge commit being built, reviewed and landed.
     pub candidate_sha: Option<String>,
     pub build_job_id: Option<String>,
+    /// Counts the merge commits given up. It is part of the build's operation
+    /// id, so even an identical commit made again gets a new job.
+    #[serde(default)]
+    pub generation: u32,
+    /// The saved merge commit is being given up and its build was asked to
+    /// stop. Neither is used again, even if the target moves back.
+    #[serde(default)]
+    pub discarding: bool,
     pub reviewer: Option<ReviewerChoice>,
     pub verdict: Option<ReviewVerdict>,
     /// Times the request was requeued because the target moved.
@@ -447,6 +455,8 @@ impl MergeQueue {
             creates_target: false,
             candidate_sha: None,
             build_job_id: None,
+            generation: 0,
+            discarding: false,
             reviewer: None,
             verdict: None,
             attempts: 0,
@@ -569,14 +579,18 @@ impl MergeQueue {
 
     /// [`Self::cancel`] for a lane that is stuck because the repository cannot
     /// be read (moved or deleted). When whether the change landed cannot be
-    /// checked, the request is cancelled and its reason says so.
+    /// checked, the request is cancelled and its reason says so. Any other
+    /// error, such as one saving a landing that was found, is returned.
     pub fn force_cancel(&self, id: &str, reason: &str) -> Result<LandRequest, MergeQueueError> {
         let _changes = self.changes();
         let mut request = self.open_request(id)?;
         let reason = match self.recover_landed(&mut request) {
             Ok(true) => return Ok(request),
             Ok(false) => reason.to_owned(),
-            Err(error) => format!("landing status unverifiable ({error}); {reason}"),
+            Err(error @ MergeQueueError::Git(_)) => {
+                format!("landing status unverifiable ({error}); {reason}")
+            }
+            Err(error) => return Err(error),
         };
         self.cancel_build(&mut request);
         self.finish(
@@ -704,13 +718,6 @@ impl MergeQueue {
             let reason = format!("gave up after {} attempts: {why}", request.attempts);
             return self.finish(request, LandState::Failed, reason);
         }
-        if request
-            .verdict
-            .as_ref()
-            .is_some_and(|v| v.reviewed_sha != request.tested_sha)
-        {
-            request.verdict = None;
-        }
         self.remove_worktree(request);
         request.state = LandState::Queued;
         request.reason = Some(why);
@@ -789,7 +796,10 @@ impl MergeQueue {
     fn build_job(&self, request: &LandRequest, candidate: &str) -> NewJob {
         let worktree = self.scratch_path(request).to_string_lossy().into_owned();
         NewJob {
-            op_id: format!("merge-queue:{}:{candidate}", request.id),
+            op_id: format!(
+                "merge-queue:{}:{}:{candidate}",
+                request.id, request.generation
+            ),
             chat_id: request.owner.chat_id.clone(),
             space_id: request.owner.space_id.clone(),
             device_id: request.owner.device_id.clone(),
@@ -859,7 +869,7 @@ impl MergeQueue {
                 Ok((head, creates)) if Some(head) == request.expected_target.as_ref()
                     && *creates == request.creates_target
             );
-            if unmoved {
+            if unmoved && !request.discarding {
                 if let Err(error) = self.ensure_worktree(request, &candidate) {
                     self.cancel_build(request);
                     let reason = format!("could not restore the merge: {error}");
@@ -871,6 +881,9 @@ impl MergeQueue {
             if let Err(error) = self.adopt_job(request) {
                 return self.wait(request, format!("an earlier build is unknown: {error}"));
             }
+            // Saved before the cancel, so a crash cannot bring the job back.
+            request.discarding = true;
+            self.save(request)?;
             self.cancel_build(request);
             if !self.build_ended(request) {
                 return self.wait(
@@ -1083,9 +1096,7 @@ impl MergeQueue {
     /// Finish a request whose ref already holds its merge commit (a crash
     /// between the ref update and the store write).
     fn recover_landed(&self, request: &mut LandRequest) -> Result<bool, MergeQueueError> {
-        if request.state != LandState::AwaitingReview
-            || !request.verdict.as_ref().is_some_and(|v| v.approved)
-        {
+        if request.state != LandState::AwaitingReview || !approved(request) {
             return Ok(false);
         }
         let Some(candidate) = request.candidate_sha.clone() else {
@@ -1127,7 +1138,7 @@ impl MergeQueue {
     }
 
     fn try_land(&self, request: &mut LandRequest) -> Result<StepOutcome, MergeQueueError> {
-        if !request.verdict.as_ref().is_some_and(|v| v.approved) {
+        if !approved(request) {
             return self.wait(request, "waiting for a review verdict".into());
         }
         if self.recover_landed(request)? {
@@ -1190,7 +1201,27 @@ fn pin(request_id: &str, name: &str) -> String {
     format!("{REF_PREFIX}/{request_id}/{name}")
 }
 
+/// Whether an approval covers what would land now: the tested commit, or the
+/// current merge commit.
+fn approved(request: &LandRequest) -> bool {
+    request.verdict.as_ref().is_some_and(|v| {
+        v.approved
+            && (v.reviewed_sha == request.tested_sha
+                || Some(&v.reviewed_sha) == request.candidate_sha.as_ref())
+    })
+}
+
+/// Give up the merge commit, along with a review of that commit alone.
 fn forget_candidate(request: &mut LandRequest) {
+    if request
+        .verdict
+        .as_ref()
+        .is_some_and(|v| v.reviewed_sha != request.tested_sha)
+    {
+        request.verdict = None;
+    }
+    request.generation += 1;
+    request.discarding = false;
     request.candidate_sha = None;
     request.expected_target = None;
     request.creates_target = false;
