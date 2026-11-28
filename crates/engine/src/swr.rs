@@ -120,9 +120,9 @@ where
         let flight = {
             let mut state = self.lock();
             if !force
-                && let Some(entry) = state.entries.get(key).map(|entry| Entry::clone(entry))
+                && let Some(entry) = state.entries.get(key)
                     && self.is_fresh(entry) {
-                        return Ok(entry.clone());
+                        return Ok(Entry::clone(entry));
                     }
             match state.inflight.get(key) {
                 Some((_, flight)) => flight.clone(),
