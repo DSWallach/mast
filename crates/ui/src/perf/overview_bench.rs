@@ -257,12 +257,19 @@ fn build_watch_overview_rows_cost_nothing_while_no_build_jobs_exist(cx: &mut gpu
         o.view_mode = OverviewMode::Outline;
         o.rows_dirty = true;
     });
+    // The Overview hands its rows to the Outline entity while it renders, so the Outline's own
+    // repaint (where the badge is read) lands on the following frame. Both halves of this test
+    // redraw this way, so the "no lookups" half covers the same paint that later counts them.
+    let redraw = |vcx: &mut gpui::VisualTestContext| {
+        draw(vcx);
+        vcx.run_until_parked();
+        draw(vcx);
+    };
     // Single-chat items compact to a dot with no status text; the badge lives on a full chat row.
     overview.update(vcx, |o, cx| o.set_compact_single_chat(false, cx));
     let now = Utc::now();
     let lookups_before = crate::build_watch::jobs::counts::lookups();
-    draw(vcx);
-    draw(vcx);
+    redraw(vcx);
     assert_eq!(
         crate::build_watch::jobs::counts::lookups(),
         lookups_before,
@@ -295,11 +302,7 @@ fn build_watch_overview_rows_cost_nothing_while_no_build_jobs_exist(cx: &mut gpu
         o.rows_dirty = true;
         cx.notify();
     });
-    // The Overview hands its rows to the Outline entity while it renders, so the Outline's own
-    // repaint (where the badge is read) lands on the following frame.
-    draw(vcx);
-    vcx.run_until_parked();
-    draw(vcx);
+    redraw(vcx);
     assert!(
         crate::build_watch::jobs::counts::lookups() > lookups_before,
         "a queued job must switch the badge lookups on"
