@@ -1,8 +1,8 @@
 //! End-to-end: `gh` visible only through the login shell's PATH is usable.
 //!
-//! This file must stay a single test: it mutates process env (SHELL/PATH/HOME)
-//! and warms the process-global login-shell snapshot cache, so it needs its
-//! own test binary with no parallel siblings.
+//! It mutates process env (SHELL/PATH/HOME) and warms the process-global login-shell snapshot
+//! cache, so it must own its process: it runs only under nextest, enforced by
+//! `require_process_per_test`.
 
 #![cfg(unix)]
 
@@ -32,7 +32,9 @@ fn run_git(cwd: &Path, args: &[&str]) {
 
 #[tokio::test]
 async fn github_cli_on_login_shell_path_only_resolves_pull_request() {
-    crate::require_process_per_test("github_cli_login_shell::github_cli_on_login_shell_path_only_resolves_pull_request");
+    crate::require_process_per_test(
+        "github_cli_login_shell::github_cli_on_login_shell_path_only_resolves_pull_request",
+    );
     let dir = tempfile::tempdir().unwrap();
     let direct_bin = dir.path().join("direct-bin");
     std::fs::create_dir(&direct_bin).unwrap();
@@ -88,7 +90,7 @@ printf '%s\n' '[{"number":90,"title":"Login shell pull request","url":"https://g
     // directly, while the user's shell makes `gh` available through its
     // login PATH. Keeping the direct PATH isolated makes this deterministic
     // even on systems that install the real GitHub CLI in /usr/bin.
-    // SAFETY: single-test binary — nothing else reads env concurrently.
+    // SAFETY: `require_process_per_test` above guarantees this test owns its process (nextest).
     unsafe {
         std::env::set_var("SHELL", &fake_shell);
         std::env::set_var("HOME", dir.path());

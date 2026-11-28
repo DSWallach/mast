@@ -1,7 +1,7 @@
 //! Regression test for GUI launches whose direct PATH cannot see `gh`.
 //!
-//! Keep this as a single-test binary: it mutates process environment and
-//! warms the process-global login-shell PATH snapshot.
+//! Mutates process environment and warms the process-global login-shell PATH snapshot, so it must
+//! own its process: it runs only under nextest, enforced by `require_process_per_test`.
 
 #![cfg(unix)]
 
@@ -18,7 +18,9 @@ fn write_executable(path: &Path, body: &str) {
 
 #[tokio::test]
 async fn pr_search_uses_login_shell_path_and_disables_prompts() {
-    crate::require_process_per_test("pr_ticket_cache_login_shell::pr_search_uses_login_shell_path_and_disables_prompts");
+    crate::require_process_per_test(
+        "pr_ticket_cache_login_shell::pr_search_uses_login_shell_path_and_disables_prompts",
+    );
     let dir = tempfile::tempdir().unwrap();
     let hostile_checkout = dir.path().join("hostile-checkout");
     std::fs::create_dir(&hostile_checkout).unwrap();
@@ -85,8 +87,8 @@ esac
     // Simulate a GUI/service launch with a hostile relative PATH. Once a gh
     // command sets `hostile_checkout` as cwd, resolving the bare name through
     // `.` would execute the checkout's file. The login shell exposes the only
-    // trusted absolute candidate. This binary has one test, so environment
-    // mutation cannot race another test.
+    // trusted absolute candidate. `require_process_per_test` makes sure
+    // environment mutation cannot race another test.
     unsafe {
         std::env::set_var("SHELL", &fake_shell);
         std::env::set_var("HOME", dir.path());

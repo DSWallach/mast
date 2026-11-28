@@ -1,6 +1,6 @@
 //! `MAST_DISABLE_WORK_OUTLINE_WRITES` turns every Work Outline mutation into
-//! `writesDisabled` while reads keep working. Its own test binary: the env
-//! var is process-wide.
+//! `writesDisabled` while reads keep working. The env var is
+//! process-wide, so this runs only under nextest, enforced by `require_process_per_test`.
 
 use std::sync::Arc;
 
@@ -11,9 +11,11 @@ use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn kill_switch_refuses_writes_and_keeps_reads() {
-    crate::require_process_per_test("work_outline_kill_switch::kill_switch_refuses_writes_and_keeps_reads");
-    // SAFETY: this binary has exactly one test, so nothing reads the
-    // environment concurrently.
+    crate::require_process_per_test(
+        "work_outline_kill_switch::kill_switch_refuses_writes_and_keeps_reads",
+    );
+    // SAFETY: `require_process_per_test` above guarantees this test owns its process (nextest),
+    // so nothing reads the environment concurrently.
     unsafe { std::env::set_var(mast_proto::work_outline::DISABLE_WRITES_ENV, "1") };
     let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("data");

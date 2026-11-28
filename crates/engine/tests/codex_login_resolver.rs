@@ -1,4 +1,5 @@
-//! Keep this as a single-test binary: it changes process environment variables.
+//! Changes process environment variables, so it must own its process: it runs only under nextest,
+//! enforced by `require_process_per_test`.
 
 #![cfg(unix)]
 
@@ -9,7 +10,9 @@ use mast_proto::HarnessId;
 
 #[tokio::test]
 async fn codex_login_resolves_override_and_adds_its_directory_to_child_path() {
-    crate::require_process_per_test("codex_login_resolver::codex_login_resolves_override_and_adds_its_directory_to_child_path");
+    crate::require_process_per_test(
+        "codex_login_resolver::codex_login_resolves_override_and_adds_its_directory_to_child_path",
+    );
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("custom-bin");
     std::fs::create_dir(&bin).unwrap();
@@ -26,7 +29,7 @@ async fn codex_login_resolves_override_and_adds_its_directory_to_child_path() {
     .unwrap();
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    // SAFETY: this binary has one test and no other environment users yet.
+    // SAFETY: `require_process_per_test` above guarantees this test owns its process (nextest).
     unsafe {
         std::env::set_var("CODEX_EXECUTABLE", &exe);
         std::env::set_var("PATH", "/usr/bin:/bin");
