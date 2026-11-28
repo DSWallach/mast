@@ -1,0 +1,41 @@
+# The Hand off dialog's aftermath, on the embedded engine: hand a chat off with the defaults (the old
+# chat is archived), see the notice, then go back to the archived chat and open its successor from its
+# menu. The world seeds engine data only; every step below is a UI action.
+name: handoff-open-successor
+world: { preset: small, seed: 1 }
+screenshot: every-step
+steps:
+  - click: "button[name='Review the workspace']"
+    caption: Open the Review the workspace chat.
+  - right_click: "button[name='Review the workspace']"
+    caption: Open the chat's row menu.
+  - click: "#outline-menu-hand-off-chat"
+    caption: Choose Hand off to new chat.
+  - click: "#hand-off-submit"
+    caption: Hand off with the defaults, which archive the old chat.
+  - expect:
+      visible: "#shell-notice-action"
+      not_visible: "#hand-off-dialog"
+    criterion: handoff-open-successor.1
+    caption: The dialog is gone and a notice says the chat was handed off, with an Open action.
+  - click: "#nav-back"
+    caption: Go back to the chat that was handed off, which is now archived.
+  - click: "#chat-header-menu"
+    caption: Open its chat menu.
+  - expect:
+      visible: "#chat-menu-open-successor"
+    criterion: handoff-open-successor.2
+    caption: The archived chat's menu offers Open successor.
+  - expect:
+      not_visible: "#hand-off-dialog"
+      text: "Review the workspace layout."
+      within: "#transcript-region"
+    caption: This is the archived chat, which still shows its own conversation.
+  - click: "#chat-menu-open-successor"
+    caption: Choose Open successor.
+  - expect:
+      text: "Continue Add search to the sidebar."
+      within: "#transcript-region"
+      not_text: "Review the workspace layout."
+    criterion: handoff-open-successor.3
+    caption: The successor opens, showing the hand-off summary and none of the old chat's messages.
