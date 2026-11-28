@@ -112,6 +112,7 @@ impl Shell {
                                 format!("chat-menu-hand-off-{chat_id}"),
                             )
                             .id("chat-menu-hand-off")
+                            .debug_selector(|| "chat-menu-hand-off".into())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.close_chat_menu(cx);
                                 this.open_hand_off(hand_off_id.clone(), cx);

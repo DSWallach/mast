@@ -963,6 +963,21 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_live_successor_can_hand_off_again(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats.iter_mut().find(|chat| chat.id == CHAT_API).unwrap().archived = true;
+                state.chats.iter_mut().find(|chat| chat.id == CHAT_UI).unwrap().hand_off_from = Some(CHAT_API.into());
+            });
+            assert!(!shell.can_hand_off(CHAT_API, cx), "the archived source cannot");
+            assert!(shell.can_hand_off(CHAT_UI, cx), "its live successor can");
+            shell.open_hand_off(CHAT_UI.into(), cx);
+            assert!(matches!(shell.work_outline_modal, Some(WorkOutlineModal::HandOff(_))));
+        });
+    }
+
+    #[gpui::test]
     fn the_outline_chat_menu_offers_open_successor_only_on_an_archived_hand_off_source(cx: &mut gpui::TestAppContext) {
         use crate::work_outline::outline_view::context_menu::{MenuAction, MenuKind, OutlineContextMenu};
         let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
