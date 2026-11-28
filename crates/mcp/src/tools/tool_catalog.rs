@@ -141,9 +141,6 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                         "description": "The commit you tested and what the tests showed. Starts one review of that commit.",
                         "properties": {
                             "testedSha": { "type": "string", "description": "The tested commit, 7 to 64 hex digits." },
-                            "changelogFragmentPath": { "type": "string" },
-                            "docDeltaPaths": { "type": "array", "items": { "type": "string" } },
-                            "artifactRefs": { "type": "array", "items": { "type": "string" } },
                             "evidence": { "type": "string", "description": "What was run and the result." }
                         },
                         "required": ["testedSha", "evidence"]
@@ -874,7 +871,7 @@ pub(crate) enum ToolCatalogProfile {
     Compact,
 }
 
-const WORKER_TOOLS: [&str; 23] = mast_proto::context_slice::WORKER_TOOL_NAMES;
+const WORKER_TOOLS: [&str; 25] = mast_proto::context_slice::WORKER_TOOL_NAMES;
 
 pub(crate) fn worker_catalog(role: Option<AgentRoleProfile>) -> bool {
     role == Some(AgentRoleProfile::Worker)

@@ -207,12 +207,18 @@ if [ "$sha" != - ]; then
     repo=$HOME/$repo
     [ -e "$repo/.git" ] || fail "no repository at $repo on this host"
     git -C "$repo" cat-file -e "$sha^{commit}" 2>/dev/null || fail "commit $sha is not on this host; push the branch to it first"
+    # These git commands keep descriptor 9: if this launcher is killed, the slot stays locked until
+    # they finish, so no later start can build a tree that one of them is still rewriting. Hooks,
+    # the fsmonitor daemon and background maintenance are off so nothing outlives them with the lock.
+    slotgit() {
+        git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c gc.auto=0 -c maintenance.auto=false "$@" >/dev/null 2>&1 6>&- 7>&- 8>&-
+    }
     if [ ! -e "$dir/.git" ]; then
-        git -C "$repo" worktree add --detach "$dir" "$sha" >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- || fail "could not create the slot checkout $dir"
+        slotgit -C "$repo" worktree add --detach "$dir" "$sha" || fail "could not create the slot checkout $dir"
     fi
-    if [ "$(git -C "$dir" rev-parse HEAD)" != "$(git -C "$repo" rev-parse "$sha^{commit}")" ]; then
-        git -C "$dir" checkout --detach --force "$sha" >/dev/null 2>&1 6>&- 7>&- 8>&- 9>&- || fail "could not check out $sha in $dir"
-    fi
+    # Always, even when HEAD already names the commit: an interrupted checkout can leave tracked
+    # files that differ from it. Unchanged files are not rewritten.
+    slotgit -C "$dir" checkout --detach --force "$sha" || fail "could not check out $sha in $dir"
     mkdir -p "$HOME/Work"
     envf=$HOME/Work/mast-slot-$slot.env
     marker='# managed by mast build_jobs'

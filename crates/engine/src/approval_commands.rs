@@ -18,30 +18,135 @@ pub(crate) struct CommandSegment {
     pub pipeline_input: bool,
 }
 
+/// Whether `text` holds a control, bidirectional or invisible character: one that could make
+/// what a person reads differ from what runs.
+pub(crate) fn has_hidden_characters(text: &str) -> bool {
+    text.chars().any(|c| c.is_control() || matches!(c,
+        '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
+        | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{e0000}'..='\u{e007f}'))
+}
+
+/// Text an approval card could not show faithfully: hidden characters, Markdown link or comment
+/// syntax, or an artifact id (the card turns those into links).
+pub(crate) fn unsafe_on_a_card(text: &str) -> bool {
+    has_hidden_characters(text) || ["](", "<!--", "```", "mast-artifact:"].iter().any(|s| text.contains(s))
+}
+
+/// Cargo flags a queued build may use. Anything else is refused, because a Space rule matches a
+/// command prefix: flags such as `--config`, `--target-dir`, `-Z` or a target spec file would
+/// let a matching command choose the compiler, the linker or the cache.
+const BUILD_FLAGS: &[&str] = &[
+    "--package", "--workspace", "--all", "--exclude", "--lib", "--bins", "--bin", "--examples",
+    "--example", "--tests", "--test", "--benches", "--bench", "--all-targets", "--features",
+    "--all-features", "--no-default-features", "--jobs", "--release", "--profile", "--target",
+    "--locked", "--offline", "--frozen", "--verbose", "--quiet", "--color", "--message-format",
+    "--keep-going", "--manifest-path", "--timings", "--future-incompat-report",
+];
+const TEST_FLAGS: &[&str] = &["--no-run", "--no-fail-fast", "--doc"];
+const NEXTEST_FLAGS: &[&str] = &[
+    "--no-run", "--no-fail-fast", "--fail-fast", "--test-threads", "--retries", "--status-level",
+    "--final-status-level", "--failure-output", "--success-output", "--partition",
+    "--run-ignored", "--filterset", "--filter-expr", "--cargo-profile", "--no-capture",
+    "--nocapture", "--build-jobs", "--no-tests", "--max-fail", "--stress-count",
+    "--hide-progress-bar", "--message-format-version", "--list-type",
+];
+
+fn validate_cargo_words(argv: &[String]) -> Result<(), &'static str> {
+    let (words, extra, first): (&[&str], &[&str], usize) = match argv.get(1).map(String::as_str) {
+        Some("test") => (TEST_FLAGS, &["-p", "-j", "-F"], 2),
+        Some("build" | "check") => (&[], &["-p", "-j", "-F"], 2),
+        Some("clippy") => (&["--no-deps"], &["-p", "-j", "-F"], 2),
+        Some("nextest") if matches!(argv.get(2).map(String::as_str), Some("run" | "list")) =>
+            (NEXTEST_FLAGS, &["-p", "-j", "-F", "-E"], 3),
+        _ => return Err("only cargo test, nextest run|list, build, check and clippy are accepted"),
+    };
+    let separator = argv.iter().position(|arg| arg == "--").unwrap_or(argv.len());
+    let mut rest = argv[first.min(separator)..separator].iter().peekable();
+    while let Some(arg) = rest.next() {
+        if !arg.starts_with('-') {
+            continue;
+        }
+        let (name, value) = arg.split_once('=').map_or((arg.as_str(), None), |(n, v)| (n, Some(v)));
+        let known = if name.starts_with("--") {
+            BUILD_FLAGS.contains(&name) || words.contains(&name)
+        } else {
+            // Short flags: exact switches, or one that takes a value, attached or not.
+            matches!(arg.as_str(), "-q" | "-v" | "-vv" | "-r") || extra.iter().any(|short| arg.starts_with(short))
+        };
+        if !known {
+            return Err("unsupported cargo flag: the build queue accepts a fixed list (no --config, --target-dir or -Z)");
+        }
+        if matches!(name, "--target" | "--manifest-path") {
+            let value = value.or_else(|| rest.peek().map(|next| next.as_str())).unwrap_or_default();
+            // A target is a triple, never a spec file; a manifest stays under cwd.
+            if name == "--target" && (value.contains(['/', '\\']) || value.ends_with(".json")) {
+                return Err("--target must be a target triple, not a file");
+            }
+            if name == "--manifest-path" && !is_relative_below(value) {
+                return Err("--manifest-path must be a relative path inside cwd");
+            }
+        }
+    }
+    let after = argv.get(separator + 1..).unwrap_or_default();
+    match argv[1].as_str() {
+        // These reach the test binary, which runs the tree's own code anyway.
+        "test" | "nextest" => Ok(()),
+        // These reach rustc, so only lint levels pass.
+        "clippy" => {
+            let mut rest = after.iter();
+            while let Some(arg) = rest.next() {
+                let lint = match arg.get(..2) {
+                    Some("-D" | "-W" | "-A" | "-F") if arg.len() > 2 => &arg[2..],
+                    Some("-D" | "-W" | "-A" | "-F") => rest.next().map(String::as_str).unwrap_or_default(),
+                    _ => "",
+                };
+                if lint.is_empty() || !lint.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':')) {
+                    return Err("after -- clippy accepts only lint levels (-D, -W, -A, -F)");
+                }
+            }
+            Ok(())
+        }
+        _ if separator < argv.len() => Err("cargo build and check take no arguments after --"),
+        _ => Ok(()),
+    }
+}
+
+fn is_relative_below(path: &str) -> bool {
+    use std::path::Component;
+    !path.is_empty() && std::path::Path::new(path).components()
+        .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
+}
+
+/// The `--manifest-path` of an accepted cargo build, if it names one.
+pub(crate) fn build_manifest_path(argv: &[String]) -> Option<&str> {
+    let mut words = argv.iter().take_while(|arg| *arg != "--");
+    while let Some(arg) = words.next() {
+        if arg == "--manifest-path" {
+            return words.next().map(String::as_str);
+        }
+        if let Some(path) = arg.strip_prefix("--manifest-path=") {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Validate the deliberately small command surface accepted by the build queue.
 /// The queue executes an argv directly; it never accepts a shell command line.
 pub(crate) fn validate_build_argv(argv: &[String]) -> Result<(), &'static str> {
     if argv.is_empty() || argv.iter().any(|arg| {
-        arg.is_empty() || arg.chars().any(|c| c == '\0' || c == '\n' || c == '\r')
-            || matches!(arg.as_str(), "|" | "||" | "&&" | ";" | "&" | ">" | ">>" | "<")
+        arg.is_empty() || matches!(arg.as_str(), "|" | "||" | "&&" | ";" | "&" | ">" | ">>" | "<")
     }) {
         return Err("build command must be a nonempty argv without shell operators");
     }
-    // The slot owns the cache directory (the queue's disk gates and slot locks depend on it).
-    if argv.iter().any(|arg| arg == "--target-dir" || arg.starts_with("--target-dir=")
-        || arg.contains("build.target-dir") || arg.contains("build.build-dir")) {
-        return Err("a build command cannot choose its target directory: the slot owns it");
+    if argv.iter().any(|arg| unsafe_on_a_card(arg)) {
+        return Err("build arguments cannot contain control, bidirectional or invisible characters, Markdown links or artifact ids");
     }
-    let allowed = match argv[0].as_str() {
-        "cargo" => matches!(argv.get(1).map(String::as_str),
-            Some("test" | "nextest" | "build" | "check" | "clippy")),
-        "scripts/ui-preview.sh" | "scripts/ui-flow.sh" => true,
-        _ => false,
-    };
-    if !allowed {
-        return Err("unsupported build command");
+    match argv[0].as_str() {
+        "cargo" => validate_cargo_words(argv),
+        "scripts/ui-preview.sh" | "scripts/ui-flow.sh" => Ok(()),
+        _ => Err("unsupported build command"),
     }
-    Ok(())
 }
 
 /// Strip only wrappers whose entire behavior is known. Keep assignments for
@@ -991,15 +1096,38 @@ mod tests {
 
     #[test]
     fn build_argv_is_restricted_to_reviewed_direct_commands() {
-        for words in [vec!["cargo", "test", "-p", "mast-engine"],
-            vec!["cargo", "nextest", "run"], vec!["scripts/ui-flow.sh", "--help"]] {
-            assert!(validate_build_argv(&words.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_ok());
+        let check = |line: &[&str]| validate_build_argv(&line.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>());
+        for words in [
+            &["cargo", "test", "-p", "mast-engine", "--lib", "build_", "--", "--nocapture", "--config"][..],
+            &["cargo", "nextest", "run", "-E", "test(x)", "--no-fail-fast"],
+            &["cargo", "check", "--locked", "-pmast-engine", "--manifest-path", "crates/engine/Cargo.toml"],
+            &["cargo", "build", "--release", "--target=x86_64-unknown-linux-gnu"],
+            &["cargo", "clippy", "--all-targets", "--", "-D", "warnings", "-Aclippy::needless_range_loop"],
+            &["scripts/ui-flow.sh", "--help"],
+        ] {
+            assert_eq!(check(words), Ok(()), "{words:?}");
         }
-        for words in [vec!["sh", "-c", "cargo test"], vec!["cargo", "run"],
-            vec!["cargo", "test", "|", "cat"], vec!["/usr/bin/cargo", "test"],
-            vec!["cargo", "test", "--target-dir", "/tmp/x"], vec!["cargo", "build", "--target-dir=x"],
-            vec!["cargo", "check", "--config", "build.target-dir='x'"]] {
-            assert!(validate_build_argv(&words.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
+        for words in [
+            &["sh", "-c", "cargo test"][..], &["cargo", "run"], &["cargo", "test", "|", "cat"],
+            &["/usr/bin/cargo", "test"], &["cargo", "nextest", "archive"],
+            &["cargo", "test", "--target-dir", "/tmp/x"], &["cargo", "build", "--target-dir=x"],
+            &["cargo", "check", "--config", "build.target-dir='x'"],
+            &["cargo", "check", "--config", "build.\"target-dir\"='x'"],
+            &["cargo", "check", "--config=build . target-dir = 'x'"],
+            &["cargo", "check", "--config", "build.rustc-wrapper='/tmp/w'"],
+            &["cargo", "check", "-Zunstable-options"], &["cargo", "check", "-Z", "x"],
+            &["cargo", "check", "-C", "/tmp"], &["cargo", "check", "--target", "/tmp/spec.json"],
+            &["cargo", "check", "--target=spec.json"],
+            &["cargo", "check", "--manifest-path", "/tmp/Cargo.toml"],
+            &["cargo", "check", "--manifest-path=../Cargo.toml"],
+            &["cargo", "check", "--manifest-path"], &["cargo", "check", "--", "-C", "linker=/tmp/l"],
+            &["cargo", "clippy", "--", "-Clinker=/tmp/l"], &["cargo", "clippy", "--", "@args"],
+            &["cargo", "clippy", "--fix"],
+            &["cargo", "test", "[x](mast-artifact:abc)"], &["cargo", "test", "[x](https://x)"],
+            &["cargo", "test", "mast-artifact:abc"], &["cargo", "test", "<!--hidden-->"],
+            &["cargo", "test", "a\u{202e}b"], &["cargo", "test", "a\u{200b}b"], &["cargo", "test", "a\nb"],
+        ] {
+            assert!(check(words).is_err(), "{words:?}");
         }
     }
 

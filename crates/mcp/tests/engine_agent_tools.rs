@@ -614,5 +614,108 @@ async fn workflow_pack_tools_need_admin_and_apply_and_undo_through_receipts() {
     assert!(err.contains("already"), "{err}");
 }
 
+/// The engine's role gate must not refuse the calls `mast-mcp` makes on its own while serving a
+/// listed tool. A real engine, so the gate, the scope replies and the MCP reach rules all run.
+#[tokio::test(flavor = "multi_thread")]
+async fn workers_and_verifiers_keep_the_reach_mcp_resolves_through_internal_calls() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(FakeClaude));
+    let core = EngineCore::assemble(&root.join("data"), Arc::new(registry), HarnessId::ClaudeCode, None)
+        .expect("engine core assembles");
+    let admin = mast_rpc::memory_client(core.rpc_service());
+    admin
+        .call(methods::MUTATE, json!({ "op": "createSpace", "spaceId": SPACE,
+            "deviceId": core.device_id, "path": project.to_string_lossy() }))
+        .await
+        .unwrap();
+    let config = mast_proto::ChatConfig {
+        harness: HarnessId::ClaudeCode,
+        ..serde_json::from_value(json!({ "harness": "claude-code", "model": null,
+            "reasoning": null, "sandbox": "workspace-write" })).unwrap()
+    };
+    let chat = |id: &str, parent: Option<&str>| {
+        core.workspace
+            .create_chat_with_parent(id, Some(SPACE), Some(&core.device_id), Some(config.clone()),
+                Some(project.to_string_lossy().into_owned()), parent.map(str::to_owned))
+            .unwrap();
+    };
+    let outline = async |mutation: Value| {
+        admin.call(methods::WORK_OUTLINE_MUTATE, mutation).await.unwrap();
+    };
+    outline(json!({ "op": "createWorkItem", "spaceId": SPACE, "title": "Project", "operationId": "p" })).await;
+    let top = derive_id("p", roles::ITEM);
+    outline(json!({ "op": "updateWorkItem", "workItemId": top, "changes": { "isProject": true }, "operationId": "p-mark" })).await;
+    let item = async |op: &str, role: Option<&str>| {
+        outline(json!({ "op": "createWorkItem", "spaceId": SPACE, "title": op,
+            "parentWorkItemId": top, "operationId": op })).await;
+        let id = derive_id(op, roles::ITEM);
+        if let Some(role) = role {
+            outline(json!({ "op": "updateWorkItem", "workItemId": id, "operationId": format!("{op}-spec"),
+                "changes": { "taskSpec": { "requiredReport": true, "taskClass": { "role": role } } } })).await;
+        }
+        id
+    };
+    let task = item("task", Some("implementer")).await;
+    let review = item("review", Some("reviewer")).await;
+    let other = item("other", None).await;
+    chat(PARENT, None);
+    for (id, parent, assigned) in [
+        ("chat-predecessor", Some(PARENT), &task),
+        ("chat-reviewer", Some(PARENT), &review),
+        ("chat-peer", None, &other),
+    ] {
+        chat(id, parent);
+        outline(json!({ "op": "assignChatToWorkItem", "chatId": id, "workItemId": assigned,
+            "operationId": format!("assign-{id}") })).await;
+    }
+    // A real hand-off: the successor is the Worker, and its predecessor is archived.
+    let handed = admin
+        .call(methods::HAND_OFF_ORCHESTRATOR, json!({ "chatId": "chat-predecessor",
+            "summary": "Continue the task", "operationId": "worker-handoff" }))
+        .await
+        .unwrap();
+    let successor = handed["chatId"].as_str().unwrap().to_owned();
+    core.workspace.set_chat_archived("chat-predecessor", true).unwrap();
+    let agent = |chat_id: &str| {
+        let lease = core.sessions.agent_tokens().mint(chat_id, "run-1", SPACE, &core.device_id);
+        let tools = Tools::new(Arc::new(Mast::with_client(
+            mast_rpc::memory_client(core.rpc_service()), Some(lease.token().to_owned()))));
+        (lease, tools)
+    };
+    let (worker_lease, worker) = agent(&successor);
+    let (_reviewer_lease, reviewer) = agent("chat-reviewer");
+
+    // Both are really held to their role lists.
+    for tools in [&worker, &reviewer] {
+        let refused = tools.call("work_outline_set_status", json!({ "status": "active", "idempotencyKey": "s" })).await.unwrap_err();
+        assert!(refused.contains("not available to this role"), "{refused}");
+    }
+    // Project reach (`chat_project_scope_chats`).
+    for tools in [&worker, &reviewer] {
+        let seen = tools.call("read_chat", json!({ "chat": "chat-peer" })).await.expect("a project chat");
+        assert!(seen.to_string().contains("chat-peer"), "{seen}");
+    }
+
+    // An archived hand-off predecessor is reachable only through the engine's scope reply.
+    worker.call("read_chat", json!({ "chat": "chat-predecessor", "limit": 2 })).await
+        .expect("a Worker reads its hand-off predecessor");
+
+    // The internal child-turn call (`chat_queue_child_turn`).
+    let operation = mast_proto::agent_tools::operation_id(&successor, "child");
+    let child = derive_id(&operation, roles::CHAT);
+    chat(&child, Some(&successor));
+    let queued = admin
+        .call(mast_proto::agent_tools::TOOL_CALL_METHOD, json!({ "token": worker_lease.token(),
+            "tool": "chat_queue_child_turn",
+            "arguments": { "chatId": child, "idempotencyKey": "child", "prompt": "go" } }))
+        .await
+        .expect("a Worker queues a turn on its own child");
+    assert!(queued["commandId"].is_string(), "{queued}");
+}
+
 #[path = "../../../test_support/isolation.rs"]
 mod test_isolation;

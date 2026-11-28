@@ -507,6 +507,34 @@ impl AgentToolsService {
         runs_dir(doc_host.device_id())
     }
 
+    /// The chat's run config, refused when the chat may not start anything that
+    /// runs outside the agent's sandbox: a command or a build.
+    pub(super) fn writable_config<'a>(
+        &self, context: &CallContext, chat: &'a mast_proto::Chat,
+    ) -> Result<&'a mast_proto::ChatConfig, AgentToolError> {
+        let forbidden = |message: &str| AgentToolError::refused(AgentToolErrorCode::Forbidden, message);
+        if self.workspace.manager_runs_read_only(&context.grant.chat_id) {
+            return Err(forbidden("a read-only Manager cannot start commands"));
+        }
+        let Some(config) = chat.config.as_ref().filter(|c| c.sandbox != SandboxLevel::ReadOnly) else {
+            return Err(forbidden("a read-only chat cannot start commands"));
+        };
+        // Turning the setting on stops commands at once (above). Turning it off
+        // does not reach a run that started read-only, as it does not reach the
+        // harness's own sandbox for that run: it applies from the next run.
+        if self.workspace.chat_is_manager(&context.grant.chat_id)
+            && lock(&self.sessions)
+                .as_ref()
+                .and_then(|sessions| sessions.last_request(&context.grant.chat_id))
+                .is_some_and(|request| request.sandbox == SandboxLevel::ReadOnly)
+        {
+            return Err(forbidden(
+                "this run started read-only; a change that allows commands applies from its next run",
+            ));
+        }
+        Ok(config)
+    }
+
     /// Check the caller may start this command. The command runs outside the
     /// agent's sandbox, so it is allowed only where the harness would run it
     /// without asking: never from a read-only chat, never from an Ask-mode
@@ -542,25 +570,7 @@ impl AgentToolsService {
             .flatten()
             .ok_or_else(|| AgentToolError::invalid("the Chat no longer exists"))?;
         let forbidden = |message: &str| AgentToolError::refused(AgentToolErrorCode::Forbidden, message);
-        if self.workspace.manager_runs_read_only(&context.grant.chat_id) {
-            return Err(forbidden("a read-only Manager cannot start commands"));
-        }
-        let Some(config) = chat.config.as_ref().filter(|c| c.sandbox != SandboxLevel::ReadOnly) else {
-            return Err(forbidden("a read-only chat cannot start commands"));
-        };
-        // Turning the setting on stops commands at once (above). Turning it off
-        // does not reach a run that started read-only, as it does not reach the
-        // harness's own sandbox for that run: it applies from the next run.
-        if self.workspace.chat_is_manager(&context.grant.chat_id)
-            && lock(&self.sessions)
-                .as_ref()
-                .and_then(|sessions| sessions.last_request(&context.grant.chat_id))
-                .is_some_and(|request| request.sandbox == SandboxLevel::ReadOnly)
-        {
-            return Err(forbidden(
-                "this run started read-only; a change that allows commands applies from its next run",
-            ));
-        }
+        let config = self.writable_config(context, &chat)?;
         let rules = lock(&self.sessions)
             .as_ref()
             .map(|s| s.permission_rules())

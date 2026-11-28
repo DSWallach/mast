@@ -27,7 +27,7 @@ If your role changes, request tools/list again for the current catalog.";
 
 /// The tools a Worker's catalog lists, in catalog order. `mast-mcp` serves the
 /// schemas; the context packet names them.
-pub const WORKER_TOOL_NAMES: [&str; 23] = [
+pub const WORKER_TOOL_NAMES: [&str; 25] = [
     "whoami",
     "get_chat",
     "read_chat",
@@ -41,7 +41,9 @@ pub const WORKER_TOOL_NAMES: [&str; 23] = [
     tools::ARTIFACT_GET_PLAN,
     tools::CONTEXT_READ_SLICE,
     tools::ARTIFACT_RENDER_CHECK,
+    tools::REVIEW_PUBLISH,
     "build_enqueue",
+    "build_list",
     "build_status",
     "build_wait",
     "build_log",
@@ -53,12 +55,25 @@ pub const WORKER_TOOL_NAMES: [&str; 23] = [
     tools::AWAIT_BACKGROUND,
 ];
 
-/// Verifiers have a read-oriented catalog and can publish their review.
-pub const VERIFIER_TOOL_NAMES: [&str; 13] = [
+/// Verifiers (reviewers and auditors) read and review: they publish a review, run permitted
+/// commands to check it, and read the builds of their own work item. They cannot start builds,
+/// start or message chats, or change the Work Outline.
+pub const VERIFIER_TOOL_NAMES: [&str; 18] = [
     "whoami", "get_chat", "read_chat", "report_to_parent", tools::READ_CURRENT,
     tools::ARTIFACT_GET_PLAN, tools::ARTIFACT_RENDER_CHECK, tools::REVIEW_GET,
-    tools::REVIEW_PUBLISH, tools::CONTEXT_READ_SLICE, "build_status", "build_log",
-    tools::REPORT_FRICTION,
+    tools::REVIEW_PUBLISH, tools::CONTEXT_READ_SLICE, "build_list", "build_status", "build_log",
+    tools::REPORT_FRICTION, tools::BIND_CHAT_WORKTREE, tools::RUN_COMMAND, tools::COMMAND_STATUS,
+    tools::AWAIT_BACKGROUND,
+];
+
+/// Engine calls `mast-mcp` makes on its own while serving a listed tool (`get_chat`,
+/// `read_chat`, `send_message`, `report_to_parent`). They are in no catalog, so the engine's role
+/// gate lets them through; each one authorizes its caller itself.
+pub const INTERNAL_TOOL_CALLS: [&str; 4] = [
+    tools::PROJECT_SCOPE_CHATS,
+    tools::CHAT_ARCHIVE_INFO,
+    tools::QUEUE_CHILD_CHAT_TURN,
+    tools::FINAL_HANDBACK,
 ];
 
 /// Catalog description of `context_read_slice`.

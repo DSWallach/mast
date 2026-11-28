@@ -5578,7 +5578,7 @@ fn records_at(rig: &Rig, path: Option<PathBuf>) -> mast_engine::review_dispatch:
 }
 
 fn completion(sha: &str) -> mast_proto::ReportCompletion {
-    mast_proto::ReportCompletion { tested_sha: sha.into(), evidence: "nextest: 120 passed".into(), ..Default::default() }
+    mast_proto::ReportCompletion { tested_sha: sha.into(), evidence: "nextest: 120 passed".into() }
 }
 
 async fn report_completion(rig: &Rig, worker: &str, sha: &str) -> Value {

@@ -509,6 +509,7 @@ struct Inner {
     holds: Mutex<HashMap<String, Hold>>,
     /// Held for one scheduling pass (or recovery).
     pass: Mutex<()>,
+    stopping: std::sync::atomic::AtomicBool,
     /// Host id -> (until, reason): starts on the host pause after a host-level refusal.
     host_backoff: Mutex<HashMap<String, (i64, String)>>,
     /// Job id -> until: an unreadable job is probed again only after this time (no ssh storm).
@@ -597,6 +598,7 @@ impl BuildJobsBuilder {
                 notify: Arc::new(tokio::sync::Notify::new()),
                 holds: Mutex::new(HashMap::new()),
                 pass: Mutex::new(()),
+                stopping: Default::default(),
                 host_backoff: Mutex::new(HashMap::new()),
                 probe_backoff: Mutex::new(HashMap::new()),
                 disk_backoff: Mutex::new(HashMap::new()),
@@ -705,7 +707,9 @@ impl BuildJobs {
 
     /// Cancel a job. A queued job is cancelled at once; a running job gets SIGTERM to its own
     /// process group (SIGKILL after 10 s) and ends `cancelled`. `requester` restricts the call to
-    /// a waiting chat (`None` is the user acting from the UI).
+    /// a waiting chat (`None` is the user acting from the UI). A chat that only shares another
+    /// chat's job is detached from it and the job carries on: the owner, or the last chat still
+    /// waiting, cancels it.
     pub fn cancel(&self, job_id: &str, requester: Option<&str>) -> Result<Job, BuildJobError> {
         let job = self.get(job_id)?;
         if let Some(chat) = requester
@@ -715,7 +719,31 @@ impl BuildJobs {
                 "chat {chat} does not own job {job_id}"
             )));
         }
+        if let Some(chat) = requester
+            && self.inner.store.detach_waiter(job_id, chat)?
+        {
+            return self.get(job_id);
+        }
         self.cancel_from(job)
+    }
+
+    /// The job `op_id` (an idempotency key) was first used for, if any.
+    pub fn operation_job(&self, op_id: &str) -> Result<Option<Job>, BuildJobError> {
+        match self.inner.store.operation_job(op_id)? {
+            Some(id) => self.inner.store.get(&id),
+            None => Ok(None),
+        }
+    }
+
+    /// Ask the engine's loop to finish: no new start, probe or wake begins after this. A call to
+    /// the host already in flight runs to its end.
+    pub fn stop(&self) {
+        self.inner.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.inner.notify.notify_one();
+    }
+
+    fn stopping(&self) -> bool {
+        self.inner.stopping.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Cancel from a snapshot that may be stale: the job can start, finish or be requeued between
@@ -857,9 +885,13 @@ impl BuildJobs {
         let _pass = self.inner.pass.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = self.now();
         for host in &self.inner.cfg.hosts {
-            self.tick_host(host, now);
+            if !self.stopping() {
+                self.tick_host(host, now);
+            }
         }
-        self.flush_wakes(now);
+        if !self.stopping() {
+            self.flush_wakes(now);
+        }
     }
 
     /// Run [`tick`](Self::tick) every `tick_ms` (or sooner when a job is enqueued or a watched
@@ -877,7 +909,7 @@ impl BuildJobs {
     }
 
     /// The engine's own loop: [`recover`](Self::recover) once, then [`spawn`](Self::spawn)'s
-    /// loop with `before_pass` run ahead of every pass. Nothing here blocks the caller, so an
+    /// loop with `before_pass` run ahead of every pass, until [`stop`](Self::stop). Nothing here blocks the caller, so an
     /// unreachable host never delays engine startup.
     pub fn serve(
         &self,
@@ -892,7 +924,7 @@ impl BuildJobs {
                 Ok(Err(error)) => tracing::warn!(%error, "build queue recovery failed"),
                 Err(error) => tracing::warn!(%error, "build queue recovery panicked"),
             }
-            loop {
+            while !this.stopping() {
                 let (pass, hook) = (this.clone(), before_pass.clone());
                 let _ = tokio::task::spawn_blocking(move || {
                     hook(&pass);
@@ -922,6 +954,9 @@ impl BuildJobs {
         }
         let free = self.free_gib(host, now);
         for job in &running {
+            if self.stopping() {
+                return;
+            }
             self.reap(
                 host,
                 executor.as_ref(),
@@ -1006,6 +1041,9 @@ impl BuildJobs {
             let mut refused = None;
             let mut host_refused = false;
             for (job_id, slot) in &plan.starts {
+                if self.stopping() {
+                    return;
+                }
                 let Some(job) = queued.iter().find(|job| &job.id == job_id) else {
                     continue;
                 };

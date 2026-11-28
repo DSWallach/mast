@@ -56,6 +56,7 @@ fn refers_to_plan_approval(request: &UserActionRequestView, artifact: &ArtifactV
     if request.dedupe_key.as_deref().is_some_and(|key| {
         mast_proto::is_approval_rule_proposal_key(key)
             || crate::agent_tools::is_codespace_approval_key(key)
+            || crate::agent_tools::is_build_approval_key(key)
     }) {
         return false;
     }
@@ -587,5 +588,25 @@ impl ArtifactQuestionSync {
                 false
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod build_card_tests {
+    use super::*;
+
+    #[test]
+    fn a_build_card_is_never_adopted_as_a_plan_approval() {
+        let artifact = ArtifactView { id: "plan1".into(), ..Default::default() };
+        let mut request: UserActionRequestView = serde_json::from_value(serde_json::json!({
+            "id": "r", "spaceId": "s", "workItemId": "w", "chatId": "c", "text": "Approve build: cargo test",
+            "info": "[x](mast-artifact:plan1)", "kind": "approve",
+        }))
+        .unwrap();
+        // The same card under any other key would be adopted.
+        request.dedupe_key = Some("other".into());
+        assert!(refers_to_plan_approval(&request, &artifact));
+        request.dedupe_key = Some("build:job1".into());
+        assert!(!refers_to_plan_approval(&request, &artifact));
     }
 }

@@ -1567,6 +1567,71 @@ fn a_start_whose_answer_was_lost_is_adopted_and_not_run_twice() {
     assert_eq!(cargo_runs(&host), 1);
 }
 
+// Coalescing across Spaces, detaching waiters, stopping -----------------------------------------
+
+#[test]
+fn identical_builds_coalesce_only_inside_one_space() {
+    let fx = Fixture::new(desktop(3));
+    let first = fx.jobs.enqueue(job("chat-a", "A", "t")).unwrap();
+    let mut elsewhere = job("chat-b", "A", "t");
+    elsewhere.space_id = "another-space".into();
+    let second = fx.jobs.enqueue(elsewhere).unwrap();
+    assert!(!second.coalesced);
+    assert_ne!(first.job.id, second.job.id);
+    assert_eq!(second.job.chat_id, "chat-b");
+    assert!(!fx.jobs.is_waiter(&first.job.id, "chat-b").unwrap());
+    // The same Space still shares one job.
+    let third = fx.jobs.enqueue(job("chat-c", "A", "t")).unwrap();
+    assert!(third.coalesced);
+    assert_eq!(third.job.id, first.job.id);
+}
+
+#[test]
+fn a_waiters_cancel_detaches_and_the_owner_or_last_waiter_cancels() {
+    for running in [false, true] {
+        let fx = Fixture::new(desktop(3));
+        let id = fx.jobs.enqueue(job("owner", "A", "t")).unwrap().job.id;
+        for chat in ["second", "third"] {
+            assert!(fx.jobs.enqueue(job(chat, "A", "t")).unwrap().coalesced);
+        }
+        if running {
+            fx.jobs.tick();
+        }
+        let left = fx.jobs.cancel(&id, Some("second")).unwrap();
+        assert!(!left.state.is_terminal() && left.stop_reason.is_none(), "{left:?}");
+        assert!(!fx.jobs.is_waiter(&id, "second").unwrap());
+        assert!(fx.jobs.cancel(&id, Some("second")).is_err(), "it no longer owns it");
+        assert!(fx.exec.stopped.lock().unwrap().is_empty());
+        let ended = fx.jobs.cancel(&id, Some("owner")).unwrap();
+        if running {
+            assert_eq!(ended.stop_reason.as_deref(), Some("cancel"), "{ended:?}");
+        } else {
+            assert_eq!(ended.state, JobState::Cancelled, "{ended:?}");
+        }
+    }
+    // The last chat waiting cancels, even if it is not the owner.
+    let fx = Fixture::new(desktop(3));
+    let id = fx.jobs.enqueue(job("owner", "A", "t")).unwrap().job.id;
+    fx.jobs.enqueue(job("second", "A", "t")).unwrap();
+    fx.jobs.inner.store.remove_waiter_for_test(&id, "owner");
+    assert_eq!(fx.jobs.cancel(&id, Some("second")).unwrap().state, JobState::Cancelled);
+}
+
+#[test]
+fn a_stopped_queue_starts_nothing_more() {
+    let fx = Fixture::new(desktop(3));
+    let jobs = fx.jobs.clone();
+    fx.jobs.enqueue(job("c1", "A", "t")).unwrap();
+    let second = fx.jobs.enqueue(job("c2", "B", "u")).unwrap().job;
+    // The engine shuts down while the first start of the pass is in flight.
+    *fx.exec.on_start.lock().unwrap() = Some(Box::new(move || jobs.stop()));
+    fx.jobs.tick();
+    assert_eq!(fx.exec.started_ids().len(), 1);
+    fx.jobs.tick();
+    assert_eq!(fx.exec.started_ids().len(), 1);
+    assert_eq!(fx.jobs.get(&second.id).unwrap().state, JobState::Queued);
+}
+
 // Startup profile --------------------------------------------------------------------------------
 
 fn settings(slot: &str) -> serde_json::Value {

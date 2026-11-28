@@ -1091,15 +1091,20 @@ enum ReservedCard {
 /// Dedupe keys only the engine's own build approval cards may use.
 const BUILD_APPROVAL_KEY_PREFIX: &str = "build:";
 
-/// The body of a build approval card: what the user is approving, in full.
+pub(crate) fn is_build_approval_key(key: &str) -> bool {
+    key.trim_start().starts_with(BUILD_APPROVAL_KEY_PREFIX)
+}
+
+/// The body of a build approval card: what the user is approving, in full. Everything but the
+/// heading is in a code block, so none of it renders as Markdown.
 fn build_approval_detail(job: &crate::build_jobs::Job) -> String {
-    format!("Build job {} on {} in {} at {}:\n{}", job.id, job.host, job.cwd,
+    format!("Build job {}:\n```\nhost: {}\ncwd: {}\ncommit: {}\n{}\n```", job.id, job.host, job.cwd,
         job.head_sha.as_deref().unwrap_or("the working tree"), shell_words::join(&job.argv))
 }
 
 /// The commit checked out in `dir`.
 fn checked_out_commit(dir: &std::path::Path) -> Option<String> {
-    let out = mast_harness::command("git").arg("-C").arg(dir).args(["rev-parse", "--verify", "HEAD"]).output().ok()?;
+    let out = mast_harness::git_command().arg("-C").arg(dir).args(["rev-parse", "--verify", "HEAD"]).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
@@ -1556,12 +1561,13 @@ impl AgentToolsService {
     pub fn call(&self, params: &AgentToolCallParams) -> Result<Value, AgentToolError> {
         let context = self.context(&params.token)?;
         let role = self.catalog_role(&context);
-        let allowed = match role {
-            Some(mast_proto::AgentRoleProfile::Worker) => mast_proto::context_slice::WORKER_TOOL_NAMES.contains(&params.tool.as_str()),
-            Some(mast_proto::AgentRoleProfile::Verifier) => mast_proto::context_slice::VERIFIER_TOOL_NAMES.contains(&params.tool.as_str()),
-            _ => true,
+        let listed: Option<&[&str]> = match role {
+            Some(mast_proto::AgentRoleProfile::Worker) => Some(&mast_proto::context_slice::WORKER_TOOL_NAMES),
+            Some(mast_proto::AgentRoleProfile::Verifier) => Some(&mast_proto::context_slice::VERIFIER_TOOL_NAMES),
+            _ => None,
         };
-        if !allowed {
+        let tool = params.tool.as_str();
+        if listed.is_some_and(|names| !names.contains(&tool) && !mast_proto::context_slice::INTERNAL_TOOL_CALLS.contains(&tool)) {
             return Err(AgentToolError::refused(AgentToolErrorCode::Forbidden, "tool is not available to this role"));
         }
         let arguments = agent_tools::normalize_arguments(&params.tool, &params.arguments);
@@ -1745,23 +1751,38 @@ impl AgentToolsService {
         if tool == "build_enqueue" {
             return self.build_enqueue(context, &jobs, arguments);
         }
+        // A Verifier starts no builds: it reads those of the chats on its own work item.
+        let reviewed_item = (self.catalog_role(context) == Some(mast_proto::AgentRoleProfile::Verifier))
+            .then(|| context.current_item_id()).flatten();
+        let reviews = |job: &crate::build_jobs::Job| reviewed_item.is_some()
+            && self.workspace.chat_assigned_work_item(&job.chat_id, &context.grant.space_id) == reviewed_item;
         if tool == "build_list" {
+            let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 100) as usize;
             let filter = crate::build_jobs::ListFilter {
-                chat_id: Some(context.grant.chat_id.clone()), space_id: Some(context.grant.space_id.clone()),
+                chat_id: reviewed_item.is_none().then(|| context.grant.chat_id.clone()),
+                space_id: Some(context.grant.space_id.clone()),
                 active_only: arguments.get("activeOnly").and_then(Value::as_bool).unwrap_or(false),
-                limit: Some(arguments.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 100) as usize),
+                limit: reviewed_item.is_none().then_some(limit),
             };
-            let visible: Vec<_> = jobs.list(&filter).map_err(error)?.iter().map(build_job_view).collect();
+            let visible: Vec<_> = jobs.list(&filter).map_err(error)?.iter()
+                .filter(|job| reviewed_item.is_none() || job.chat_id == context.grant.chat_id || reviews(job))
+                .take(limit).map(build_job_view).collect();
             return Ok(json!({"jobs": visible}));
         }
         let id = arguments.get("jobId").and_then(Value::as_str).filter(|s| !s.is_empty()).ok_or_else(|| AgentToolError::invalid("jobId is required"))?;
         let job = jobs.get(id).map_err(error)?;
-        if job.space_id != context.grant.space_id || !jobs.is_waiter(id, &context.grant.chat_id).map_err(error)? {
+        let readable = matches!(tool, "build_status" | "build_log") && reviews(&job);
+        if job.space_id != context.grant.space_id || !(readable || jobs.is_waiter(id, &context.grant.chat_id).map_err(error)?) {
             return Err(AgentToolError::refused(AgentToolErrorCode::Forbidden, "build job is outside this chat"));
         }
         match tool {
             "build_status" => Ok(json!({"job":build_job_view(&job),"position":jobs.position(id).map_err(error)?})),
-            "build_cancel" => Ok(json!({"job":build_job_view(&jobs.cancel(id, Some(&context.grant.chat_id)).map_err(error)?)})),
+            "build_cancel" => {
+                let job = jobs.cancel(id, Some(&context.grant.chat_id)).map_err(error)?;
+                // A chat that shared another chat's job only leaves it; the job carries on.
+                let detached = !jobs.is_waiter(id, &context.grant.chat_id).map_err(error)?;
+                Ok(json!({"job":build_job_view(&job),"detached":detached}))
+            }
             "build_wait" => { jobs.arm_wake(id, &context.grant.chat_id).map_err(error)?; Ok(json!({"job":build_job_view(&job),"wakeRegistered":true})) },
             "build_log" => {
                 let offset = arguments.get("offset").and_then(Value::as_u64).unwrap_or(0);
@@ -1783,13 +1804,25 @@ impl AgentToolsService {
         crate::approval_commands::validate_build_argv(&argv).map_err(AgentToolError::invalid)?;
         let text = |key: &str| arguments.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
         let chat = self.workspace.chat(&context.grant.chat_id).ok().flatten().ok_or_else(|| AgentToolError::invalid("the Chat no longer exists"))?;
+        self.writable_config(context, &chat)?;
         let root = chat.cwd.as_deref().and_then(|c| std::fs::canonicalize(c).ok()).ok_or_else(|| AgentToolError::invalid("the Chat has no working directory"))?;
         let cwd = match text("cwd") {
-            Some(cwd) => std::fs::canonicalize(cwd).map_err(|_| AgentToolError::invalid("cwd must be an existing directory"))?,
+            // A relative cwd is relative to the Chat's directory, never the engine's.
+            Some(cwd) => std::fs::canonicalize(root.join(cwd)).map_err(|_| AgentToolError::invalid("cwd must be an existing directory"))?,
             None => root.clone(),
         };
         if !cwd.is_dir() || !cwd.starts_with(&root) {
             return Err(AgentToolError::invalid("cwd must be a directory inside the Chat's working directory"));
+        }
+        // A manifest that exists must not lead out of the build's directory through a link.
+        if let Some(manifest) = crate::approval_commands::build_manifest_path(&argv)
+            && let Ok(resolved) = std::fs::canonicalize(cwd.join(manifest))
+            && !resolved.starts_with(&cwd)
+        {
+            return Err(AgentToolError::invalid("--manifest-path must stay inside cwd"));
+        }
+        if text("label").is_some_and(|label| crate::approval_commands::has_hidden_characters(&label)) {
+            return Err(AgentToolError::invalid("label cannot contain control, bidirectional or invisible characters"));
         }
         let cwd_text = cwd.to_string_lossy().into_owned();
         let sessions = lock(&self.sessions).clone();
@@ -1803,8 +1836,11 @@ impl AgentToolsService {
             return Err(AgentToolError::invalid("only cargo commands run on a remote build host"));
         }
         // A remote host builds a commit, not this directory: default to the one checked out here.
+        // A retry keeps the commit its first call resolved, even if the checkout has moved since.
+        let first = jobs.operation_job(&op_id).map_err(|e| AgentToolError::invalid(e.to_string()))?;
         let head_sha = match text("headSha") {
             Some(sha) => Some(sha),
+            None if first.is_some() => first.and_then(|job| job.head_sha),
             None if remote => Some(checked_out_commit(&cwd).ok_or_else(|| AgentToolError::invalid("headSha is required: cwd has no checked-out commit"))?),
             None => None,
         };
@@ -1841,8 +1877,15 @@ impl AgentToolsService {
 
     fn raise_build_approval(&self, context: &CallContext, job: &crate::build_jobs::Job) -> Result<Option<String>, AgentToolError> {
         // The title and body come from the job alone: nothing the agent words itself.
-        let command: String = shell_words::join(&job.argv).chars().take(80).collect();
+        let mut command = shell_words::join(&job.argv);
+        if let Some((cut, _)) = command.char_indices().nth(80) {
+            command.truncate(cut);
+            command.push('…');
+        }
         let detail = build_approval_detail(job);
+        if [job.cwd.as_str(), job.host.as_str()].iter().any(|text| crate::approval_commands::unsafe_on_a_card(text)) {
+            return Err(AgentToolError::invalid("the directory or host name cannot be shown faithfully on an approval card"));
+        }
         if detail.chars().count() > mast_proto::user_action_limits::MAX_REQUEST_INFO_CHARS {
             return Err(AgentToolError::invalid("the command is too long to show in full on an approval card; shorten it or add a Space approval rule"));
         }
@@ -2810,7 +2853,8 @@ impl AgentToolsService {
         // its own dedupe key on a later revision.
         let lower_request = args.request.to_ascii_lowercase();
         // Rule proposals and Codespace operations can refer to a plan without asking to approve it.
-        let is_plan_approval = !rule_proposal
+        // An engine build card is never one, whatever its command mentions.
+        let is_plan_approval = card == ReservedCard::None
             && !args
                 .dedupe_key
                 .as_deref()

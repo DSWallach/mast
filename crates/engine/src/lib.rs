@@ -1192,9 +1192,16 @@ impl EngineCore {
         self.doc_host.pause_all_queues();
         self.orchestrator_wakes.shutdown();
         let build_queue_task = self.build_queue_task.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-        if let Some(task) = build_queue_task {
-            task.abort();
-            let _ = task.await;
+        if let Some(mut task) = build_queue_task {
+            // Aborting would leave a blocking pass running against a torn-down engine, so ask the
+            // loop to stop and wait for the pass in flight; only a stuck host call is left behind.
+            if let Ok(jobs) = &self.build_queue {
+                jobs.stop();
+            }
+            if tokio::time::timeout(std::time::Duration::from_secs(30), &mut task).await.is_err() {
+                tracing::warn!("build queue pass did not finish; leaving it behind");
+                task.abort();
+            }
         }
         self.work_queue_cancel.cancel();
         self.peer_outbound_cancel.cancel();

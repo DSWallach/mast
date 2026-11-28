@@ -454,7 +454,7 @@ mod catalog_tests {
         }
         let response = request("tools/list", json!({})).await;
         let listed = response["result"]["tools"].as_array().unwrap();
-        assert_eq!(listed.len(), 23);
+        assert_eq!(listed.len(), 25);
         assert!(listed.iter().any(|tool| tool["name"] == "context_read_slice"));
         let bind = listed
             .iter()

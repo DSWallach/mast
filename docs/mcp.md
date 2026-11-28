@@ -137,20 +137,24 @@ A project Manager can reach chats in its managed project, including archived cha
 
 ### Build queue: `build_*`
 
-Six compact tools queue and follow builds on the shared build queue (`build_jobs`), so a chat does not run Cargo itself. Each schema is under 600 bytes. They are visible to Worker, Verifier and coordinator chats; the queue must be configured on the engine, otherwise every call fails with "build queue is unavailable: <reason>" (not configured, disabled, or what is wrong with the profile).
+Six compact tools queue and follow builds on the shared build queue (`build_jobs`), so a chat does not run Cargo itself. Each schema is under 600 bytes. Workers and coordinator chats see all six. A Verifier sees only `build_list`, `build_status` and `build_log`, and cannot start, wait for or cancel a build. The queue must be configured on the engine, otherwise every call fails with "build queue is unavailable: <reason>" (not configured, disabled, or what is wrong with the profile).
 
 | Tool | Purpose | Scoping |
 |---|---|---|
-| `build_enqueue {idempotencyKey, argv, cwd?, headSha?, host?, label?, wake?, integration?}` | Queue a job. Returns the job, its queue `position`, `replay`/`coalesced`, `approvalRequestId` and `matchedRule`. | `cwd` stays inside the chat's working directory. Reusing a key with a different argv fails with `operationConflict`. |
-| `build_status {jobId}` | State, slot, exit code, summary and queue position. | Only a chat attached to the job (its owner or a coalesced waiter) in the same Space. |
-| `build_list {activeOnly?, limit?}` | The chat's own jobs, newest first (default 50, at most 100). | This chat and Space only. |
+| `build_enqueue {idempotencyKey, argv, cwd?, headSha?, host?, label?, wake?, integration?}` | Queue a job. Returns the job, its queue `position`, `replay`/`coalesced`, `approvalRequestId` and `matchedRule`. | Refused in a read-only chat, like `run_command`. `cwd` (relative paths start at the chat's directory) stays inside it. A retry with the same key returns the first job, even after a new commit; the same key with a different command fails with `operationConflict`. |
+| `build_status {jobId}` | State, slot, exit code, summary and queue position. | A chat attached to the job (its owner or a coalesced waiter) in the same Space, or a Verifier on the owner's work item. |
+| `build_list {activeOnly?, limit?}` | Jobs, newest first (default 50, at most 100). | The chat's own jobs in its Space. A Verifier also sees those of chats on its own work item. |
 | `build_wait {jobId}` | Register the completion wake and return at once; end the turn and the engine wakes the chat. | Attached chats only. |
-| `build_log {jobId, offset?, maxBytes?}` | A byte window of the job log (default 8 KiB, at most 64 KiB) and `nextOffset`. | Attached chats only. |
-| `build_cancel {jobId}` | Cancel a queued or running job. | Attached chats only. |
+| `build_log {jobId, offset?, maxBytes?}` | A byte window of the job log (default 8 KiB, at most 64 KiB) and `nextOffset`. | As `build_status`. |
+| `build_cancel {jobId}` | Cancel a queued or running job. | Attached chats only. A chat that shares another chat's job only leaves it (`detached: true`) and the job carries on; the owner, or the last chat waiting, cancels it. |
 
-`argv` is run directly: no shell, no pipes or redirection. Only `cargo test|nextest|build|check|clippy`, `scripts/ui-preview.sh` and `scripts/ui-flow.sh` are accepted. `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` belong to the slot, so `--target-dir` and a `--config` that sets the build directory are refused. A remote host accepts only `cargo` commands and builds a commit: `headSha` defaults to the commit checked out in `cwd`, uncommitted changes are not built, and the commit must already be on the host.
+Identical queued builds coalesce into one job only within a Space.
 
-**Approval.** The command text is matched against the Space's enabled `ApprovalRule`s with the same matcher as harness command prompts. A match queues the job at once and counts as a use of the rule: its `hitCount` and `lastUsedAt` advance. With no match the job waits in `awaiting_approval` and an Approve Required Action (`dedupeKey` `build:<jobId>`) is raised on the chat's work item. When the user approves it the job is queued; any other resolution cancels it. The engine's queue loop applies the answer within a few seconds. The card's title and body come from the job alone (the `label` is not shown) and always hold the whole command; an approval counts only while the card still shows exactly that. The `build:` dedupe prefix is reserved for these cards. With no matching rule, `build_enqueue` is refused for a chat with no work item and for a command too long to show in full.
+**Commands.** `argv` is run directly: no shell, no pipes or redirection. Only `cargo test|build|check|clippy`, `cargo nextest run|list`, `scripts/ui-preview.sh` and `scripts/ui-flow.sh` are accepted. A Space rule matches a command prefix, so Cargo flags come from a fixed list (package, target-selection, feature, profile and output flags, plus test-runner flags). `--config`, `--target-dir`, `-Z`, `-C` and any flag not on the list are refused. `--target` must be a triple, not a spec file, and `--manifest-path` must be a relative path that stays inside `cwd`. After `--`, `build` and `check` take nothing, `clippy` takes only lint levels (`-D`, `-W`, `-A`, `-F`), and test arguments are free. Arguments containing control, bidirectional or invisible characters, Markdown link or comment syntax, or an artifact id are refused. `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` belong to the slot. These limits bound what a rule admits; they do not sandbox the build, which runs the tree's own build scripts and tests.
+
+**What a remote build builds.** A remote host accepts only `cargo` commands and builds a commit: `headSha` defaults to the commit checked out in `cwd`, uncommitted changes are not built, and the commit must already be on the host. Rules are matched against the local `cwd`, but the remote build runs at the root of the slot checkout, at whatever `headSha` the call names (not necessarily the one checked out in `cwd`). A rule scoped to a directory therefore does not limit which commit or directory the host builds; relative paths such as `--manifest-path` start at that root.
+
+**Approval.** The command text is matched against the Space's enabled `ApprovalRule`s with the same matcher as harness command prompts. A match queues the job at once and counts as a use of the rule: its `hitCount` and `lastUsedAt` advance. With no match the job waits in `awaiting_approval` and an Approve Required Action (`dedupeKey` `build:<jobId>`) is raised on the chat's work item. When the user approves it the job is queued; any other resolution cancels it. The engine's queue loop applies the answer within a few seconds. The card's title and body come from the job alone (the `label` is not shown). The body is a code block that always holds the whole command (the title is cut at 80 characters, marked `…`); an approval counts only while the card still shows exactly that. Only the user can record an approval, and a build card is never treated as a plan approval. The `build:` dedupe prefix is reserved for these cards. With no matching rule, `build_enqueue` is refused for a chat with no work item and for a command too long to show in full.
 
 #### Turning the queue on
 
@@ -177,15 +181,24 @@ The queue is off until `<engine data dir>/build-queue.json` enables it and descr
 }
 ```
 
-`checkout` is an absolute path on the engine's machine; the queue runs its `scripts/remote-cargo.sh`. `sshAlias` must be an ssh alias (no `user@host` or address). `repo`, `checkoutPrefix` and `targetPrefix` are relative to the host's `$HOME`. `maxRunners` is at most the number of slots. `startMode` is `"admit"` (which requires the target prefix above), `"plain"` or `{"deviceSerial": "<serial>"}` (one runner).
+`checkout` is an absolute path on the engine's machine; the queue runs its `scripts/remote-cargo.sh`. **Use a trusted checkout:** the engine runs that script as it is on disk each time, with your SSH access, without pinning a version. Do not point it at a checkout that agents edit or that tracks unreviewed branches. `sshAlias` must be an ssh alias (no `user@host` or address). `repo`, `checkoutPrefix` and `targetPrefix` are relative to the host's `$HOME`. `maxRunners` is at most the number of slots. `startMode` is `"admit"` (which requires the target prefix above), `"plain"` or `{"deviceSerial": "<serial>"}` (one runner).
 
 **Shared hosts and lost connections.** No engine owns a host. The host's slot lock and slot job record, kept by `remote-cargo.sh`, are the only fence between devices: a slot checkout moves only inside `start`, while the slot is locked and idle. When the answer to a start is lost, the engine fences that attempt on the host before it queues the job again. See [the slot lock and dropped connections](internal/desktop-build-host.md#build-queue-the-slot-lock-is-the-only-cross-device-fence) for each case and its limits.
 
 ### Role-scoped catalog and `quota_status`
 
 The tool catalog a chat sees depends on its live role. A Worker sees a short list
-(its own reads, `report_to_parent`, friction, `run_command`, `command_status`,
-`await_background`); a Manager or Lead sees the full catalog except the
+(its own reads, `report_to_parent`, `send_message`, user action requests, artifact
+publishing, `review_publish`, friction, the `build_*` tools, `run_command`,
+`command_status`, `await_background`). A Verifier (a reviewer or spec auditor)
+sees a read-and-review list: chat and plan reads, `report_to_parent`,
+`review_get`, `review_publish`, friction, `bind_chat_worktree`, `run_command`,
+`command_status`, `await_background`, and `build_list`, `build_status` and
+`build_log` for its own work item. Deliberately, it cannot start or message
+chats, start builds, publish artifacts, raise user action requests or change the
+Work Outline. The engine enforces both lists on every call; the calls `mast-mcp`
+makes on its own while serving a listed tool are exempt, and each authorizes
+itself. A Manager or Lead sees the full catalog except the
 user-only `mast_manage` and `admin` tools and the workflow-pack tools; a chat
 with no role sees the ordinary catalog. The role is re-read from the engine on
 each listing, so a hand-off or an archived scope changes what a chat sees without

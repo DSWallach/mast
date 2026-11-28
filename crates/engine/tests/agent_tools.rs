@@ -11672,6 +11672,7 @@ async fn a_configured_engine_runs_one_queue_for_every_surface_and_applies_a_decl
     let jobs = rig.core.build_jobs().expect("a configured queue").clone();
     assert_eq!(jobs.config().default_host, "desktop");
     assert_eq!(jobs.config().hosts.len(), 1, "no host is added by default");
+    configure_command_chat(&rig, CHAT, command_config(false, false, SandboxLevel::WorkspaceWrite));
     let item = create_item(&rig, "build-item", "Build", None).await;
     assign_chat(&rig, "build-assign", CHAT, &item).await;
     let owner = rig.core.sessions.agent_tokens().mint(CHAT, "run-build", SPACE, &rig.core.device_id);
@@ -11721,4 +11722,217 @@ async fn a_build_nobody_could_approve_is_refused_instead_of_queued() {
     let error = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "x", "argv": ["cargo", "check"] })).await.unwrap_err();
     assert!(error.contains("no work item"), "{error}");
     assert!(jobs.list(&Default::default()).unwrap().is_empty());
+}
+
+// Review follow-ups: approval cards, scoping, retries.
+
+/// A queue and a chat that can raise approval cards, with a work item.
+async fn build_rig() -> (Rig, mast_engine::build_jobs::BuildJobs, String) {
+    let rig = rig().await;
+    let jobs = build_queue(&rig);
+    for chat in [CHAT, OTHER_CHAT] {
+        configure_command_chat(&rig, chat, command_config(false, false, SandboxLevel::WorkspaceWrite));
+    }
+    let item = create_item(&rig, "build-item", "Build", None).await;
+    assign_chat(&rig, "build-assign", CHAT, &item).await;
+    (rig, jobs, item)
+}
+
+fn build_token(rig: &Rig, chat: &str) -> mast_engine::agent_tools::AgentTokenLease {
+    rig.core.sessions.agent_tokens().mint(chat, "run-build", SPACE, &rig.core.device_id)
+}
+
+fn card(rig: &Rig, id: &str) -> mast_proto::work_outline_user_actions::UserActionRequestView {
+    mast_doc::materialize_work_outline(SPACE, &rig.core.workspace.work_outline_inputs(SPACE))
+        .user_action_requests.into_iter().find(|r| r.id == id).expect("the approval card")
+}
+
+fn resolve_card(rig: &Rig, id: &str, by: &mast_proto::work_outline::WorkOutlineActor) -> Result<(), String> {
+    use mast_proto::work_outline::WorkOutlineMutation;
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::ResolveUserActionRequest(mast_proto::work_outline_user_actions::ResolveUserActionRequestParams {
+        outcome: Some("approved".into()), values: None, via: Some("card".into()), user_action_request_id: id.into(), note: None, answer: None, operation_id: format!("resolve-{id}"),
+    }), by, &[]).map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_build_card_never_becomes_a_plan_approval() {
+    let (rig, jobs, item) = build_rig().await;
+    let owner = build_token(&rig, CHAT);
+    // A pinned plan is what a plan approval would attach to.
+    std::fs::write(std::path::Path::new(&rig.space_path).join("plan.md"), "# Plan\n\nDo it.\n").unwrap();
+    let plan = tool(&rig, owner.token(), "artifact_publish", json!({ "path": "plan.md", "title": "Plan",
+        "role": "plan", "pinAsPlan": true, "idempotencyKey": "plan-1" })).await.unwrap();
+    let plan_id = plan["artifactId"].as_str().unwrap().to_owned();
+    let link = format!("[x](mast-artifact:{plan_id})");
+    for argv in [json!(["cargo", "test", link]), json!(["cargo", "test", format!("mast-artifact:{plan_id}")])] {
+        let refused = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "l", "argv": argv })).await.unwrap_err();
+        assert!(refused.contains("artifact ids"), "{refused}");
+    }
+    // A command that only talks about approving the plan stays a build card.
+    let queued = tool(&rig, owner.token(), "build_enqueue",
+        json!({ "idempotencyKey": "p", "argv": ["cargo", "test", "approve plan"] })).await.unwrap();
+    let job_id = queued["job"]["jobId"].as_str().unwrap().to_owned();
+    let request = card(&rig, queued["approvalRequestId"].as_str().unwrap());
+    assert_eq!(request.dedupe_key, Some(format!("build:{job_id}")));
+    assert_eq!(request.work_item_id, item);
+    let info = request.info.unwrap();
+    assert!(info.contains("```\n") && info.contains("cargo test 'approve plan'") && !info.contains("Plan revision"), "{info}");
+    assert_eq!(jobs.get(&job_id).unwrap().state, mast_engine::build_jobs::JobState::AwaitingApproval);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_an_untouched_card_the_user_approves_queues_a_build() {
+    use mast_proto::work_outline::{WorkOutlineActorKind, WorkOutlineMutation};
+    use mast_engine::build_jobs::JobState;
+    let (rig, jobs, _) = build_rig().await;
+    let owner = build_token(&rig, CHAT);
+    let enqueue = async |key: &str| {
+        let reply = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": key, "argv": ["cargo", "test", key] })).await.unwrap();
+        (reply["job"]["jobId"].as_str().unwrap().to_owned(), reply["approvalRequestId"].as_str().unwrap().to_owned())
+    };
+    // The agent cannot record an approval of its own card, by the tool or as an agent actor.
+    let (job, request) = enqueue("self").await;
+    let by_tool = tool(&rig, owner.token(), "work_outline_resolve_user_action_request",
+        json!({ "userActionRequestId": request, "outcome": "approved", "idempotencyKey": "self-approve" })).await;
+    assert!(by_tool.is_err(), "{by_tool:?}");
+    let agent = mast_proto::work_outline::WorkOutlineActor { kind: WorkOutlineActorKind::Agent,
+        device_id: rig.core.device_id.clone(), chat_id: Some(CHAT.into()), message_id: None };
+    let by_actor = resolve_card(&rig, &request, &agent);
+    assert!(by_actor.unwrap_err().contains("cannot record this outcome"));
+    tool(&rig, owner.token(), "build_list", json!({})).await.unwrap();
+    assert_eq!(jobs.get(&job).unwrap().state, JobState::AwaitingApproval);
+    // Closing it without an outcome, which an agent may do, never queues the build.
+    tool(&rig, owner.token(), "work_outline_resolve_user_action_request",
+        json!({ "userActionRequestId": request, "idempotencyKey": "self-close" })).await.unwrap();
+    tool(&rig, owner.token(), "build_list", json!({})).await.unwrap();
+    assert_eq!(jobs.get(&job).unwrap().state, JobState::Cancelled);
+
+    // A card whose text was changed no longer shows this command: approving it queues nothing.
+    let (job, request) = enqueue("tampered").await;
+    let before = card(&rig, &request);
+    let mut params: mast_proto::work_outline_user_actions::CreateUserActionRequestParams = serde_json::from_value(json!({
+        "workItemId": before.work_item_id, "origin": { "chatId": CHAT }, "text": "Approve build: cargo check",
+        "info": "Build job:\n```\ncargo check\n```", "dedupeKey": format!("build:{job}"), "operationId": "tamper" })).unwrap();
+    params.kind = Some(mast_proto::UserActionKind::Approve);
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::UpdateUserActionRequest(mast_proto::UpdateUserActionRequestParams {
+        user_action_request_id: request.clone(), request: params }), &user_actor(&rig), &[]).unwrap();
+    resolve_card(&rig, &request, &user_actor(&rig)).unwrap();
+    tool(&rig, owner.token(), "build_list", json!({})).await.unwrap();
+    assert_eq!(jobs.get(&job).unwrap().state, JobState::Cancelled);
+
+    // The untouched card, approved by the user, does queue it.
+    let (job, request) = enqueue("good").await;
+    resolve_card(&rig, &request, &user_actor(&rig)).unwrap();
+    tool(&rig, owner.token(), "build_list", json!({})).await.unwrap();
+    assert_eq!(jobs.get(&job).unwrap().state, JobState::Queued);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn build_tools_refuse_other_chats_escaping_paths_and_read_only_chats() {
+    let (rig, jobs, _) = build_rig().await;
+    let (owner, other) = (build_token(&rig, CHAT), build_token(&rig, OTHER_CHAT));
+    let queued = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "o", "argv": ["cargo", "check"] })).await.unwrap();
+    let job = queued["job"]["jobId"].as_str().unwrap().to_owned();
+    for name in ["build_status", "build_wait", "build_log", "build_cancel"] {
+        let refused = tool(&rig, other.token(), name, json!({ "jobId": job })).await.unwrap_err();
+        assert!(refused.contains("outside this chat"), "{name}: {refused}");
+    }
+    // cwd: absolute, relative and through a link, all must stay under the chat's directory.
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), std::path::Path::new(&rig.space_path).join("away")).unwrap();
+    std::fs::write(outside.path().join("Cargo.toml"), "").unwrap();
+    for cwd in [outside.path().to_str().unwrap(), "..", "away"] {
+        let refused = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "e", "argv": ["cargo", "check"], "cwd": cwd })).await.unwrap_err();
+        assert!(refused.contains("cwd must be"), "{cwd}: {refused}");
+    }
+    let linked = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "m", "argv": ["cargo", "check", "--manifest-path", "away/Cargo.toml"] })).await.unwrap_err();
+    assert!(linked.contains("--manifest-path"), "{linked}");
+    // A relative cwd is relative to the chat's directory.
+    std::fs::create_dir_all(std::path::Path::new(&rig.space_path).join("sub")).unwrap();
+    let sub = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "sub", "argv": ["cargo", "check"], "cwd": "sub" })).await.unwrap();
+    assert!(sub["job"]["cwd"].as_str().unwrap().ends_with("project/sub"), "{sub}");
+    configure_command_chat(&rig, CHAT, command_config(true, false, SandboxLevel::ReadOnly));
+    let before = jobs.list(&Default::default()).unwrap().len();
+    let refused = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "ro", "argv": ["cargo", "check"] })).await.unwrap_err();
+    assert!(refused.contains("read-only"), "{refused}");
+    assert_eq!(jobs.list(&Default::default()).unwrap().len(), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_space_rule_does_not_admit_flags_that_choose_the_toolchain_or_leave_the_tree() {
+    use mast_proto::work_outline::{ApprovalRule, ApprovalRuleHarness, SetApprovalRuleParams, WorkOutlineMutation};
+    let (rig, jobs, _) = build_rig().await;
+    let rule = ApprovalRule {
+        id: "rule-check".into(), label: "Checks".into(), created_by: "user".into(),
+        harness: ApprovalRuleHarness::Any, enabled: true, argv_prefix: vec!["cargo".into(), "check".into()],
+        command_regex: None, cwd_scope: None, require_isolated_home: false, constraints: None, hit_count: 0, last_used_at: None,
+    };
+    rig.core.workspace.work_outline_mutate(&WorkOutlineMutation::SetApprovalRule(SetApprovalRuleParams {
+        space_id: SPACE.into(), rule, operation_id: "rule".into(), edit_environment: false,
+    }), &user_actor(&rig), &[]).unwrap();
+    let owner = build_token(&rig, CHAT);
+    for extra in [
+        vec!["--config", "build.rustc-wrapper='/tmp/w'"], vec!["--config", "build.\"target-dir\"='/tmp/t'"],
+        vec!["--manifest-path", "/tmp/Cargo.toml"], vec!["--manifest-path=../Cargo.toml"], vec!["--target-dir", "t"],
+    ] {
+        let mut argv = vec!["cargo", "check"];
+        argv.extend(extra);
+        assert!(tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "x", "argv": argv })).await.is_err(), "{argv:?}");
+    }
+    assert!(jobs.list(&Default::default()).unwrap().is_empty());
+    // A command outside the prefix is not admitted by it.
+    let unmatched = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "t", "argv": ["cargo", "test"] })).await.unwrap();
+    assert_eq!((unmatched["job"]["state"].as_str(), unmatched["matchedRule"].is_null()), (Some("awaiting_approval"), true));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_verifier_reads_the_builds_of_its_own_work_item_only() {
+    let (rig, _, item) = build_rig().await;
+    let owner = build_token(&rig, CHAT);
+    let queued = tool(&rig, owner.token(), "build_enqueue", json!({ "idempotencyKey": "v", "argv": ["cargo", "check"] })).await.unwrap();
+    let job = queued["job"]["jobId"].as_str().unwrap().to_owned();
+    update_item(&rig, "review-spec", &item, json!({ "taskSpec": { "requiredReport": true, "taskClass": { "role": "reviewer" } } })).await.unwrap();
+    // A reviewer is a child chat on the reviewed item; one on another item sees nothing.
+    let config = command_config(false, false, SandboxLevel::WorkspaceWrite);
+    let elsewhere = create_item(&rig, "elsewhere", "Elsewhere", None).await;
+    update_item(&rig, "elsewhere-spec", &elsewhere, json!({ "taskSpec": { "requiredReport": true, "taskClass": { "role": "reviewer" } } })).await.unwrap();
+    for (chat, on) in [("reviewer-here", &item), ("reviewer-there", &elsewhere)] {
+        rig.core.workspace.create_chat_with_parent(chat, Some(SPACE), Some(&rig.core.device_id), Some(config.clone()),
+            Some(rig.space_path.clone()), Some(OTHER_CHAT.into())).unwrap();
+        assign_chat(&rig, &format!("assign-{chat}"), chat, on).await;
+    }
+    let (here, there) = (build_token(&rig, "reviewer-here"), build_token(&rig, "reviewer-there"));
+    for name in ["build_status", "build_log"] {
+        tool(&rig, here.token(), name, json!({ "jobId": job })).await.unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(tool(&rig, there.token(), name, json!({ "jobId": job })).await.is_err(), "{name}");
+    }
+    let ids = |reply: Value| reply["jobs"].as_array().unwrap().iter().map(|j| j["jobId"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    assert_eq!(ids(tool(&rig, here.token(), "build_list", json!({})).await.unwrap()), vec![job.clone()]);
+    assert!(ids(tool(&rig, there.token(), "build_list", json!({})).await.unwrap()).is_empty());
+    for name in ["build_enqueue", "build_cancel", "build_wait"] {
+        let refused = tool(&rig, here.token(), name, json!({ "jobId": job })).await.unwrap_err();
+        assert!(refused.contains("not available to this role"), "{name}: {refused}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_after_a_new_commit_replays_the_first_build() {
+    let rig = rig_with_build_settings(Some(build_settings())).await;
+    configure_command_chat(&rig, CHAT, command_config(false, false, SandboxLevel::WorkspaceWrite));
+    let item = create_item(&rig, "build-item", "Build", None).await;
+    assign_chat(&rig, "build-assign", CHAT, &item).await;
+    let owner = build_token(&rig, CHAT);
+    let commit = |message: &str| {
+        for args in [&["init", "-q"][..], &["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", message]] {
+            assert!(mast_harness::git_command().current_dir(&rig.space_path).args(args).status().unwrap().success());
+        }
+    };
+    commit("one");
+    let args = json!({ "idempotencyKey": "moved", "argv": ["cargo", "check"] });
+    let first = tool(&rig, owner.token(), "build_enqueue", args.clone()).await.unwrap();
+    commit("two");
+    let again = tool(&rig, owner.token(), "build_enqueue", args).await.expect("the same key replays");
+    assert_eq!((&again["job"]["jobId"], &again["job"]["headSha"], again["replay"].as_bool()),
+        (&first["job"]["jobId"], &first["job"]["headSha"], Some(true)));
+    rig.core.shutdown().await;
 }

@@ -305,6 +305,46 @@ check "fence before the start arrives" 0 fenced -- rc fence h $tag-co5
 check "a fence is repeatable" 0 fenced -- rc fence h $tag-co5
 check "a fenced start that arrives late is refused" 1 "name in use" -- co "$one" $tag-co5 ok
 [ "$(head_of)" = "$two" ] && pass "a fenced start did not move the checkout" || fail "a fenced start moved the checkout"
+# An interrupted checkout at the same commit is repaired, not built as it is.
+G checkout -q -B main "$two"; echo clean > "$HOME/Work/repo/tracked"; G add tracked; G commit -q -m tracked; three=$(G rev-parse HEAD)
+check "start the commit with a tracked file" 0 "started" -- co "$three" $tag-co8 ok
+check "wait co8" 0 "exit 0" -- rc wait h $tag-co8 20s
+echo half-written > "$HOME/Work/mast-wt-build-a/tracked"
+check "the same commit starts again" 0 "started" -- co "$three" $tag-co9 ok
+check "wait co9" 0 "exit 0" -- rc wait h $tag-co9 20s
+[ "$(cat "$HOME/Work/mast-wt-build-a/tracked")" = clean ] && pass "the tracked file was restored" || fail "a half-written file was built"
+
+# A launcher killed during its checkout leaves git running: git keeps the slot lock until it ends.
+REAL_GIT=$(command -v git)
+export REAL_GIT
+cat > "$tmp/bin/git" <<'EOF'
+#!/bin/sh
+case " $* " in
+*" checkout "*) if [ -e "$FAKE_CARGO_DIR/git-hold" ]; then
+    : > "$FAKE_CARGO_DIR/git-running"
+    while [ -e "$FAKE_CARGO_DIR/git-hold" ]; do sleep 0.1; done
+fi ;;
+esac
+exec "$REAL_GIT" "$@"
+EOF
+chmod +x "$tmp/bin/git"
+: > "$tmp/git-hold"
+co "$one" $tag-orphan ok > "$tmp/orphan.out" 2>&1 &
+orphan_client=$!
+i=0
+while [ ! -e "$tmp/git-running" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+[ -e "$tmp/git-running" ] && pass "the checkout is in progress" || fail "the checkout never started: $(cat "$tmp/orphan.out")"
+kill -KILL "$(cat "/tmp/$tag-orphan.pid")"
+wait "$orphan_client" 2>/dev/null
+check "the orphaned git still holds the slot lock" 1 "slot a lock timeout" -- co "$three" $tag-after-orphan ok
+rm -f "$tmp/git-hold"
+sleep 1
+check "once git ends the slot can start" 0 "started" -- co "$three" $tag-after-orphan2 ok
+check "wait after the orphan" 0 "exit 0" -- rc wait h $tag-after-orphan2 20s
+[ "$(head_of)" = "$three" ] && [ "$(cat "$HOME/Work/mast-wt-build-a/tracked")" = clean ] \
+    && pass "the next job built its own tree" || fail "the orphan changed the next job's tree"
+rm -f "$tmp/bin/git"
+
 check "--checkout refuses a path outside HOME" 2 "Usage" -- rc start --checkout ../repo "$one" t 0 h wt a $tag-co6 -- cargo ok
 check "--checkout refuses an option-like commit" 2 "Usage" -- rc start --checkout Work/repo --force t 0 h wt a $tag-co7 -- cargo ok
 unset FAKE_FLOCK_REAL REMOTE_CARGO_SLOT_PREFIX REMOTE_CARGO_QUIET_LOCK REMOTE_CARGO_ADMIT_LOCK REMOTE_CARGO_DEVICE_LOCK REMOTE_CARGO_MIN_MEM_KIB

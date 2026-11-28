@@ -251,12 +251,12 @@ impl Store {
             }
             let argv = serde_json::to_string(&new.argv).map_err(store_error)?;
             let env = serde_json::to_string(&new.env).map_err(store_error)?;
-            // Coalescing: an identical *queued* job gains this chat as a waiter. An identical running
-            // job does not, because the tree may have changed since it started.
+            // Coalescing: an identical *queued* job of the same Space gains this chat as a waiter.
+            // An identical running job does not, because the tree may have changed since it started.
             let twin: Option<String> = tx
                 .query_row(
                     "SELECT id FROM jobs WHERE host=?1 AND state='queued' AND worktree_key=?2 AND cwd=?3 AND argv=?4 AND env=?5 \
-                       AND IFNULL(head_sha,'')=?6 AND integration=?7 AND IFNULL(lease_id,'')=?8 ORDER BY seq LIMIT 1",
+                       AND IFNULL(head_sha,'')=?6 AND integration=?7 AND IFNULL(lease_id,'')=?8 AND space_id=?9 ORDER BY seq LIMIT 1",
                     params![
                         host,
                         new.worktree_key,
@@ -265,7 +265,8 @@ impl Store {
                         env,
                         new.head_sha.clone().unwrap_or_default(),
                         new.integration as i64,
-                        new.lease_id.clone().unwrap_or_default()
+                        new.lease_id.clone().unwrap_or_default(),
+                        new.space_id
                     ],
                     |r| r.get(0),
                 )
@@ -417,6 +418,35 @@ impl Store {
             )
             .map(|n| n as usize)
         })
+    }
+
+    /// The job an idempotency key was first used for.
+    pub fn operation_job(&self, op_id: &str) -> Result<Option<String>, BuildJobError> {
+        self.with(|c| {
+            c.query_row("SELECT job_id FROM operations WHERE op_id=?1", [op_id], |r| r.get(0))
+                .optional()
+        })
+    }
+
+    /// Remove `chat_id` from an unfinished job that is not its own and that another chat still
+    /// waits on. `false` when this chat's cancel has to cancel the job instead. One statement, so
+    /// two waiters leaving at once cannot both detach and orphan the job.
+    pub fn detach_waiter(&self, job_id: &str, chat_id: &str) -> Result<bool, BuildJobError> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM waiters WHERE job_id=?1 AND chat_id=?2 \
+                   AND EXISTS (SELECT 1 FROM jobs WHERE id=?1 AND chat_id!=?2 AND state IN ('awaiting_approval','queued','running')) \
+                   AND (SELECT COUNT(*) FROM waiters WHERE job_id=?1)>1",
+                [job_id, chat_id],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn remove_waiter_for_test(&self, job_id: &str, chat_id: &str) {
+        self.with(|c| c.execute("DELETE FROM waiters WHERE job_id=?1 AND chat_id=?2", [job_id, chat_id]))
+            .unwrap();
     }
 
     pub fn is_waiter(&self, job_id: &str, chat_id: &str) -> Result<bool, BuildJobError> {
