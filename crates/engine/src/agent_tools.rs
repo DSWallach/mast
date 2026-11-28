@@ -3943,7 +3943,9 @@ impl AgentToolsService {
             config.as_ref().map(|c| c.harness),
             args.account_id.as_deref(),
         )?;
-        let continues = if args.separate {
+        // A caller that names a harness or model chose a new worker on purpose;
+        // only an unqualified launch continues the item's stopped one.
+        let continues = if args.separate || !(args.harness_omitted && args.model_omitted) {
             None
         } else {
             self.continuation_source(&context, &snapshot, &args.work_item_id, &operation_id)?
@@ -3974,7 +3976,9 @@ impl AgentToolsService {
     /// hand-off of the existing worker instead, which keeps the assignment,
     /// lineage, worktree, configuration and pending wakes. A separate
     /// reviewer or parallel assignment says so with `separate`. Refused while
-    /// that worker is running a turn (reuse it, or pass `separate`). A retry of
+    /// that worker is running a turn (reuse it, or pass `separate`), and not
+    /// attempted for a worker that finished idle (reuse it) or when the caller
+    /// named a harness or model. A retry of
     /// a launch that already handed its worker off finds the source from the
     /// recorded hand-off.
     fn continuation_source(
@@ -4005,16 +4009,20 @@ impl AgentToolsService {
             candidates.push(chat);
         }
         let Some(source) = candidates.into_iter().max_by_key(|chat| chat.created_at) else { return Ok(None) };
-        let running = lock(&self.sessions).as_ref().and_then(|sessions| sessions.session_status(&source.id))
-            .is_some_and(|session| matches!(
-                session.status,
-                mast_proto::SessionStatus::Working | mast_proto::SessionStatus::AwaitingInput
-            ));
-        if running {
-            return Err(AgentToolError::invalid(format!(
-                "this item already has a running worker, {}; send it the prompt (create_chat reuses it), or pass newChat to start a separate reviewer or parallel assignment",
-                source.id
-            )));
+        // Only a worker that stopped is continued: one that errored, or one
+        // with no live session (after a restart). An idle worker that finished
+        // is reused by `create_chat`, and a running one is not duplicated.
+        let status = lock(&self.sessions).as_ref().and_then(|sessions| sessions.session_status(&source.id))
+            .map(|session| session.status);
+        match status {
+            Some(mast_proto::SessionStatus::Working | mast_proto::SessionStatus::AwaitingInput) => {
+                return Err(AgentToolError::invalid(format!(
+                    "this item already has a running worker, {}; send it the prompt (create_chat reuses it), or pass newChat to start a separate reviewer or parallel assignment",
+                    source.id
+                )));
+            }
+            Some(mast_proto::SessionStatus::Idle) => return Ok(None),
+            Some(mast_proto::SessionStatus::Errored) | None => {}
         }
         Ok(Some(source.id))
     }
