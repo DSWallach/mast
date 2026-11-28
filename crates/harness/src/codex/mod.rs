@@ -818,7 +818,7 @@ impl CodexHarness {
             HarnessId::Codex,
             self.account_home.as_deref(),
             requested_sandbox,
-            agent_tools.is_some(),
+            agent_tools.as_ref(),
         );
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);

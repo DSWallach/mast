@@ -326,6 +326,13 @@ impl CursorHarness {
             cmd.env("MAST_CURSOR_STATE_DIR", state::state_root());
         }
         crate::compose_child_path(&mut cmd, &exe);
+        crate::account_home::scrub_worker_env(
+            &mut cmd,
+            HarnessId::Cursor,
+            None,
+            request.sandbox,
+            tools.as_ref(),
+        );
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }

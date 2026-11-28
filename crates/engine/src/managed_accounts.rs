@@ -402,7 +402,8 @@ impl ManagedAccounts {
 
     /// The env vars that make a CLI use account `id`'s home, and nothing else:
     /// `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, or for Antigravity both `GEMINI_HOME`
-    /// (what `agy` reads) and `GEMINI_CLI_HOME` (what Gemini CLI tooling reads).
+    /// (Mast's own Antigravity path resolution) and `GEMINI_CLI_HOME` (the plan's
+    /// name). The installed `agy` CLI ignores both; see `account_home::home_envs`.
     /// A sandboxed worker's child environment is built from exactly these plus
     /// its allowlist (see `mast_harness::account_home`), so it never sees
     /// another account's home.

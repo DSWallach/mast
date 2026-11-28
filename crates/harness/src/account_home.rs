@@ -19,9 +19,11 @@ use std::path::Path;
 pub const CLAUDE_KEYCHAIN_ISOLATED: bool = true;
 
 /// The env vars that relocate this harness's home, if it has any. Antigravity
-/// gets both names: `agy` reads `GEMINI_HOME` (see `acp::antigravity_paths`)
-/// and Gemini CLI tooling reads `GEMINI_CLI_HOME`, so a managed home must win
-/// under either.
+/// gets both Gemini names. `GEMINI_HOME` is the one Mast's own Antigravity
+/// launch and path resolution use (`acp::antigravity_paths`);
+/// `GEMINI_CLI_HOME` is the name the v0.3.0 plan specifies. Tested on
+/// 2026-11-27 against the installed `agy` CLI: it ignores BOTH and keeps its
+/// state in `$HOME/.gemini`, so these variables alone do not isolate `agy`.
 pub fn home_envs(id: HarnessId) -> &'static [&'static str] {
     match id {
         HarnessId::ClaudeCode => &["CLAUDE_CONFIG_DIR"],
@@ -293,11 +295,23 @@ pub fn scrub_worker_env_from(
     }
 }
 
-/// True for a run whose child must be scrubbed: a `WorkspaceWrite` run with a
-/// scoped agent token (an engine-orchestrated worker). The harness cannot see
-/// the role, so Manager and Lead runs with the same shape are scrubbed too.
-pub fn is_sandboxed_worker(sandbox: mast_proto::SandboxLevel, has_agent_token: bool) -> bool {
-    sandbox == mast_proto::SandboxLevel::WorkspaceWrite && has_agent_token
+/// Key in `AgentToolsInjection::env` the engine sets to `1` for a task worker
+/// (a child chat with an Implementer, TestAuthor or DocWriter task and no
+/// standing role, admin grant or assistant designation). It is the only signal
+/// the harness has for "this run is a worker": a run without it, whatever its
+/// token, keeps its full environment.
+pub const WORKER_SCRUB_ENV: &str = "MAST_AGENT_SCRUB";
+
+/// True for a run whose child must be scrubbed: a `WorkspaceWrite` run whose
+/// agent tools carry the engine's worker flag ([`WORKER_SCRUB_ENV`]). Managers,
+/// Leads, Verifiers, admin and assistant chats, interactive chats, read-only
+/// and full-access runs are never flagged.
+pub fn is_sandboxed_worker(
+    sandbox: mast_proto::SandboxLevel,
+    tools: Option<&crate::AgentToolsInjection>,
+) -> bool {
+    sandbox == mast_proto::SandboxLevel::WorkspaceWrite
+        && tools.is_some_and(|t| t.env.get(WORKER_SCRUB_ENV).is_some_and(|v| v == "1"))
 }
 
 /// Scrub `cmd` from the live process environment when this run is a sandboxed
@@ -307,9 +321,9 @@ pub fn scrub_worker_env(
     id: HarnessId,
     home: Option<&Path>,
     sandbox: mast_proto::SandboxLevel,
-    has_agent_token: bool,
+    tools: Option<&crate::AgentToolsInjection>,
 ) {
-    if is_sandboxed_worker(sandbox, has_agent_token) {
+    if is_sandboxed_worker(sandbox, tools) {
         scrub_worker_env_now(cmd, id, home);
     }
 }
@@ -624,10 +638,37 @@ mod tests {
 
     #[test]
     fn the_scrub_applies_only_to_workspace_write_runs_with_an_agent_token() {
-        assert!(is_sandboxed_worker(SandboxLevel::WorkspaceWrite, true));
-        assert!(!is_sandboxed_worker(SandboxLevel::WorkspaceWrite, false));
-        assert!(!is_sandboxed_worker(SandboxLevel::ReadOnly, true));
-        assert!(!is_sandboxed_worker(SandboxLevel::DangerFullAccess, true));
+        let tools = |flag: Option<&str>| crate::AgentToolsInjection {
+            server_name: "mast-agent".into(),
+            command: PathBuf::from("/bin/true"),
+            args: Vec::new(),
+            env: [("MAST_AGENT_TOKEN".to_owned(), "zat_synthetic".to_owned())]
+                .into_iter()
+                .chain(flag.map(|v| (WORKER_SCRUB_ENV.to_owned(), v.to_owned())))
+                .collect(),
+        };
+        let flagged = tools(Some("1"));
+        assert!(is_sandboxed_worker(
+            SandboxLevel::WorkspaceWrite,
+            Some(&flagged)
+        ));
+        // A token alone is not enough: Manager, Lead, Verifier, admin and
+        // interactive runs carry one but are never flagged.
+        let unflagged = tools(None);
+        assert!(!is_sandboxed_worker(
+            SandboxLevel::WorkspaceWrite,
+            Some(&unflagged)
+        ));
+        assert!(!is_sandboxed_worker(
+            SandboxLevel::WorkspaceWrite,
+            Some(&tools(Some("0")))
+        ));
+        assert!(!is_sandboxed_worker(SandboxLevel::WorkspaceWrite, None));
+        assert!(!is_sandboxed_worker(SandboxLevel::ReadOnly, Some(&flagged)));
+        assert!(!is_sandboxed_worker(
+            SandboxLevel::DangerFullAccess,
+            Some(&flagged)
+        ));
         // A run that is not a sandboxed worker keeps the command untouched.
         let mut cmd = crate::process::Command::new("claude");
         cmd.env("KEEP", "1");
@@ -636,7 +677,16 @@ mod tests {
             HarnessId::ClaudeCode,
             None,
             SandboxLevel::DangerFullAccess,
-            true,
+            Some(&flagged),
+        );
+        assert_eq!(cmd.as_std().get_envs().count(), 1);
+        // …and so does an unflagged WorkspaceWrite run, token or not.
+        scrub_worker_env(
+            &mut cmd,
+            HarnessId::ClaudeCode,
+            None,
+            SandboxLevel::WorkspaceWrite,
+            Some(&unflagged),
         );
         assert_eq!(cmd.as_std().get_envs().count(), 1);
     }

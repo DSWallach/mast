@@ -1175,7 +1175,7 @@ impl AcpHarness {
                 true,
                 &[],
                 crate::ScheduledEnv::of(&request),
-                crate::account_home::is_sandboxed_worker(request.sandbox, agent_tools.is_some()),
+                crate::account_home::is_sandboxed_worker(request.sandbox, agent_tools.as_ref()),
             )
             .await?;
         let stdin = child

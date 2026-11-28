@@ -184,10 +184,16 @@ fn tools() -> AgentToolsInjection {
         server_name: "mast-agent".into(),
         command: PathBuf::from("/bin/true"),
         args: vec!["mcp".into()],
-        env: [(
-            "MAST_AGENT_TOKEN".to_owned(),
-            "zat_scoped_synthetic".to_owned(),
-        )]
+        env: [
+            (
+                "MAST_AGENT_TOKEN".to_owned(),
+                "zat_scoped_synthetic".to_owned(),
+            ),
+            (
+                mast_harness::account_home::WORKER_SCRUB_ENV.to_owned(),
+                "1".to_owned(),
+            ),
+        ]
         .into(),
     }
 }
@@ -256,7 +262,7 @@ async fn a_sandboxed_acp_worker_child_sees_no_foreign_credentials_or_homes() {
         "the child keeps HOME"
     );
 
-    // Controls: without an agent token, or outside WorkspaceWrite, the environment is untouched.
+    // Controls: outside WorkspaceWrite, or (see worker_env_scrub) without the worker flag, the environment is untouched.
     for (sandbox, with_tools) in [
         (SandboxLevel::WorkspaceWrite, false),
         (SandboxLevel::DangerFullAccess, true),

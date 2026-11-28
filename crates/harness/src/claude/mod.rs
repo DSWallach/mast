@@ -782,7 +782,7 @@ impl ClaudeHarness {
             HarnessId::ClaudeCode,
             self.account_home.as_deref(),
             request.sandbox,
-            agent_tools.is_some(),
+            agent_tools,
         );
         if title_only {
             cmd.args([

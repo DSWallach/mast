@@ -571,13 +571,42 @@ impl SessionsEngine {
         }
         let launch = lock(&self.inner.agent_tools_launch).clone()?;
         let chat = self.inner.workspace()?.chat(chat_id).ok().flatten()?;
-        let space_id = chat.space_id.filter(|space| !space.is_empty())?;
+        let space_id = chat.space_id.clone().filter(|space| !space.is_empty())?;
         let lease = self
             .inner
             .agent_tokens
             .mint(chat_id, run_id, &space_id, &self.inner.device_id);
-        let injection = launch.injection_for_harness(lease.token(), harness.id())?;
+        let mut injection = launch.injection_for_harness(lease.token(), harness.id())?;
+        if self.is_task_worker_chat(&chat, &space_id) {
+            // The harness scrubs a sandboxed worker's child environment (P12)
+            // only on this flag; it cannot see roles itself.
+            injection
+                .env
+                .insert(mast_harness::account_home::WORKER_SCRUB_ENV.into(), "1".into());
+        }
         Some((lease, injection))
+    }
+
+    /// Whether `chat` runs as a task worker: a child chat whose assigned task
+    /// is an Implementer, TestAuthor or DocWriter with a required report, and
+    /// that holds no standing role, admin grant or assistant designation.
+    /// Anything undecidable (no workspace, no spec) is not a worker.
+    fn is_task_worker_chat(&self, chat: &mast_proto::Chat, space_id: &str) -> bool {
+        let Some(workspace) = self.inner.workspace() else {
+            return false;
+        };
+        let spec = workspace.chat_task_spec(&chat.id, space_id);
+        is_task_worker(
+            chat.parent_chat_id.is_some(),
+            workspace.standing_role_of_chat(&chat.id).is_some(),
+            self.inner.agent_tokens.admin().live(&chat.id).is_some()
+                || self
+                    .inner
+                    .agent_tokens
+                    .personal_assistant()
+                    .is_assistant(chat, || workspace.read_chats().unwrap_or_default()),
+            crate::agent_tools::assigned_catalog_role(spec.as_ref()),
+        )
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -6349,4 +6378,43 @@ pub fn followup_seed_text(task: &str, run_id: &str, result: Option<&str>) -> Str
     }
     out.push_str("\n\n---\n\n");
     out
+}
+
+/// The worker decision behind the P12 environment scrub (see
+/// `Sessions::is_task_worker_chat`). Fails closed: only a plain child chat
+/// with a leaf-task role is a worker.
+fn is_task_worker(
+    has_parent: bool,
+    has_standing_role: bool,
+    admin_or_assistant: bool,
+    assigned_role: Option<mast_proto::AgentRoleProfile>,
+) -> bool {
+    has_parent
+        && !has_standing_role
+        && !admin_or_assistant
+        && assigned_role == Some(mast_proto::AgentRoleProfile::Worker)
+}
+
+#[cfg(test)]
+mod worker_scrub_tests {
+    use super::is_task_worker;
+    use mast_proto::AgentRoleProfile::{Admin, Lead, Manager, Verifier, Worker};
+
+    #[test]
+    fn only_a_plain_child_worker_is_flagged_for_the_environment_scrub() {
+        // (parent, standing role, admin/assistant, assigned role) -> flagged
+        for (case, args, flagged) in [
+            ("task worker", (true, false, false, Some(Worker)), true),
+            ("interactive chat, no parent", (false, false, false, Some(Worker)), false),
+            ("Manager", (false, true, false, Some(Manager)), false),
+            ("Lead with a parent", (true, true, false, Some(Lead)), false),
+            ("standing role beats a worker spec", (true, true, false, Some(Worker)), false),
+            ("Verifier", (true, false, false, Some(Verifier)), false),
+            ("admin grant or assistant", (true, false, true, Some(Worker)), false),
+            ("admin role", (true, false, false, Some(Admin)), false),
+            ("child with no task spec", (true, false, false, None), false),
+        ] {
+            assert_eq!(is_task_worker(args.0, args.1, args.2, args.3), flagged, "{case}");
+        }
+    }
 }

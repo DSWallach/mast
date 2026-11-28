@@ -471,7 +471,7 @@ impl OpencodeHarness {
                 cwd.as_deref(),
                 crate::ScheduledEnv::of(&request),
                 tools,
-                crate::account_home::is_sandboxed_worker(request.sandbox, tools.is_some()),
+                crate::account_home::is_sandboxed_worker(request.sandbox, tools),
             )
             .await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);

@@ -525,7 +525,7 @@ impl AgentToolsLaunch {
 // Service
 // ---------------------------------------------------------------------------
 
-fn assigned_catalog_role(spec: Option<&mast_proto::WorkItemTaskSpec>) -> Option<mast_proto::AgentRoleProfile> {
+pub(crate) fn assigned_catalog_role(spec: Option<&mast_proto::WorkItemTaskSpec>) -> Option<mast_proto::AgentRoleProfile> {
     use mast_proto::{AgentRoleProfile, TaskRole};
 
     let spec = spec.filter(|spec| spec.required_report)?;

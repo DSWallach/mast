@@ -46,29 +46,31 @@ Chats on Antigravity, Grok, Devin, Hermes, Pi and opencode tag a quota error the
 
 ## Antigravity account homes
 
-An Antigravity login lives in a Gemini home folder. When Mast points a chat at a Mast-managed home, it sets **both** `GEMINI_HOME` (what `agy` reads) and `GEMINI_CLI_HOME` (what Gemini CLI tools read) to that one folder, so neither falls back to `~/.gemini`. Antigravity cannot own a Space account yet, because it has no in-app sign-in flow; Mast still isolates the home variables so that a Claude or Codex worker never sees an Antigravity home.
+An Antigravity login lives in a Gemini home folder (`~/.gemini` by default). When Mast points a chat at a Mast-managed home, it sets **both** `GEMINI_HOME` (the name Mast's own Antigravity setup reads) and `GEMINI_CLI_HOME` to that one folder.
+
+Know the limit: the `agy` command-line program itself (checked with the version installed on 2026-11-27) ignores both names and keeps its state under `~/.gemini` in the user's home, so these variables alone do not separate two Antigravity logins. Antigravity cannot own a Space account yet, because it has no in-app sign-in flow. What does work today: a Claude or Codex worker never sees an Antigravity home variable.
 
 ## Worker environment scrubbing
 
-A chat that Mast starts as part of orchestrated work (sandbox **workspace-write**, with an agent token) runs its agent with a rebuilt environment, not a copy of yours. Only these reach it:
+A chat that Mast starts as a task worker (a child chat with an implement, test or docs task) and runs in **workspace-write** mode runs its agent with a rebuilt environment, not a copy of yours. Only these reach it:
 
-- the basics a process needs (`PATH`, `HOME`, `USER`, locale, `TERM`, `TMPDIR`, `XDG_*`, proxy and certificate settings, `SSH_AUTH_SOCK`);
+- the basics a process needs (`PATH`, `HOME`, `USER`, locale, `TERM`, `TMPDIR`, `XDG_*`);
+- network settings: the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, lower-case too) and certificate settings (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`);
+- `SSH_AUTH_SOCK`;
 - toolchain settings (`CARGO_*`, `RUSTUP_*`, `RUST*`, `NODE_*`, `NPM_CONFIG_*`, `PYTHON*`, `GOPATH`, `JAVA_HOME` and similar), unless the name looks like a secret (`TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`);
-- the agent's own settings (`ANTHROPIC_*` and `CLAUDE_*` for Claude Code, `OPENAI_*` and `CODEX_*` for Codex, and so on);
+- the agent's own settings (`ANTHROPIC_*` and `CLAUDE_*` for Claude Code, `OPENAI_*` and `CODEX_*` for Codex, `CURSOR_*` for Cursor, and so on);
 - `MAST_*` settings, and the chat's own scoped `MAST_AGENT_TOKEN`;
 - its single account home (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, or the Gemini pair).
 
-Everything else is dropped, including other providers' API keys, other accounts' home folders, an inherited `MAST_AGENT_TOKEN`, raw OAuth refresh tokens (`*REFRESH_TOKEN*`, always, even for the agent's own provider), and general secrets such as `GH_TOKEN`, `AWS_*` and `NPM_TOKEN`. On a Space account, the agent's own API-key variables (such as `ANTHROPIC_API_KEY`) are dropped too, so a key in your shell cannot override the account's login. Chats on the Default account keep their own variables.
+Everything else is dropped, including other providers' API keys, other accounts' home folders, an inherited `MAST_AGENT_TOKEN`, raw OAuth refresh tokens (`*REFRESH_TOKEN*`, always, even for the agent's own provider), and general secrets such as `GH_TOKEN`, `AWS_*` and `NPM_TOKEN`. On a Space account, the agent's own API-key variables (such as `ANTHROPIC_API_KEY`) are dropped too, so a key in your shell cannot override the account's login. Chats on the Default account keep their own variables. This covers Claude Code, Codex, Cursor, opencode and the ACP agents (Antigravity, Grok, Devin, Hermes, Pi).
 
-Scrubbing applies to workspace-write runs with an agent token. Read-only and full-access runs, and ordinary chats without one, are unchanged. Mast cannot tell a Manager from a worker at this point, so Manager and Lead chats are scrubbed the same way.
+Managers, Leads, reviewers, admin and assistant chats, ordinary chats you start yourself, and read-only or full-access runs are not scrubbed and keep your environment.
 
-If a tool in a worker needs a variable that is dropped, list its name in `MAST_WORKER_ENV_PASSTHROUGH` (comma or space separated) in the environment Mast runs in. A listed variable is passed through, except `MAST_AGENT_TOKEN` and refresh tokens, which are never passed.
+### What is kept on purpose
 
-Scrubbing hides secrets carried in the environment. It does not stop a worker from reading files your user can read; the sandbox decides that.
+- **Proxy and certificate variables** stay because a worker behind a corporate proxy cannot reach its model provider or fetch dependencies without them. The catch: a proxy URL can carry a username and password (`http://user:pass@host`), and the worker can read it.
+- **`SSH_AUTH_SOCK`** stays so a worker's `git` and `ssh` keep working against your agent. The catch: a worker can use every key loaded in that agent, as you, for as long as the run lives. Workers do not merge, but they could push.
 
-## Try it
+To opt out of either, start Mast with those variables unset (this affects Mast's own network use too) or, for the agent-socket case, with `SSH_AUTH_SOCK` pointing at an agent that holds only the keys workers should have. To go the other way and let a worker see a variable the scrub drops, list its name in `MAST_WORKER_ENV_PASSTHROUGH` (comma or space separated) in the environment Mast runs in. It is **off by default** (unset means nothing extra passes), and only the names you list pass. `MAST_AGENT_TOKEN` and refresh tokens are never passed, even if listed.
 
-1. Add an account to one Space and sign in with a different login.
-2. Start a chat in that Space. Check the account chip in the chat header.
-3. Start a chat in another Space and check that it shows Default.
-4. Run both at once.
+Scrubbing hides secrets carried in the environment. It does not stop a worker from reading files your user can read (for example the Default account's login file under `~/.claude`); the sandbox decides that.
