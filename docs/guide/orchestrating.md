@@ -76,6 +76,31 @@ The Manager's role instructions tell it to publish a new status at the end of ev
 
 The manager cannot write files, so it publishes the document as text with `artifact_publish`. Any chat inside the project can read the latest revision with `briefing_read` and `kind: "manager-status"`. Chats in other projects cannot see it.
 
+## Manager → Lead → Worker
+
+A big project can add a middle tier. A **Lead** owns one slice of the project (one work item and everything under it), starts and watches that slice's Workers, and tells the Manager how it stands. The Manager then talks to at most four Leads instead of every Worker.
+
+| Tier | Depth | Sandbox | Starts |
+| --- | --- | --- | --- |
+| Manager | 0 | read-only | Leads and its own Workers |
+| Lead | 1 | read-only | its Workers |
+| Worker | 2 | writes in its own worktree | nothing |
+
+Start a Lead with `create_chat` on the slice's item, `standingRole: lead` and the Manager's chat as `parentChatId`. Mast refuses:
+
+- a Lead whose parent is not the project's Manager, a Lead on the project itself, and a fifth Lead in one project;
+- a Worker under a Worker of a Lead (depth 3), and a seventh Worker under one Lead. Archive a finished chat to free its place;
+- a Lead prompt over about 8,000 tokens. Send the slice and the contracts it depends on, not the whole project;
+- a Lead whose `itemBudget` is more than the project's budget minus the other Leads', or whose `ownedPaths` overlap another Lead's. A Worker's `ownedPaths` and `itemBudget` must sit inside its Lead's the same way.
+
+A Lead's Workers are your ordinary Workers: they report to the Lead with `report_to_parent`, and the Lead's wakes tell it when they finish or get stuck. **The Manager never sees those events**, not even when the Lead is archived or has wakes turned off. A Worker's Required Actions still show in Needs You.
+
+When a Lead reports to the Manager, Mast sends a *Lead digest*: the first part of the report, cut to about 350 tokens, with the Lead's item and chat ids. Put the outcome, blockers and PR links first. A Manager that needs the detail reads the Lead's chat with `read_chat`.
+
+A Lead hands off like any other chat (`hand_off_orchestrator`). The successor takes over the Lead role for the same item, stays read-only under the same Manager, and its Workers follow it. A hand-off does not count as a new Lead.
+
+Only local Leads (on the Manager's device) are supported today. A Lead on a paired device is planned.
+
 ## Queue wakes
 
 When a project's work queue has a ready item and fewer than one queued worker is running, the Manager gets a **Work queue** line in its next update, naming the item. Start a worker on it with `create_chat` and that item's `workItemId`, or say why you are not starting it; the item is not offered again until it stops being ready and becomes ready again, except that an offer no worker answered is repeated once after each engine restart (the wake is held in memory) and, once three offers went unanswered, the next restart raises a Required Action for you. Check for an existing worker before starting one. An item whose worker is still working, or was active in the last 30 minutes without erroring, counts as running and holds the single queue slot; an item whose worker errored or has been idle longer is stalled, shown with its reason, and does not block the next offer. An item whose pull request has merged is done and is never offered; an item whose pull request status is not known yet is held until it is. An item can name prerequisites with `work_queue_set` (`prerequisites`, items of the same project). It then shows as waiting, with the prerequisite and why, and is not offered until each one is complete; entries behind it are still offered. Each item has a completion (`completion`): `reported` (the default) is met by a final handback, a merged pull request or a completed item, while `landed` is met only by a merged pull request or a person completing the item, so a worker's report, passing tests and an agent marking the item completed are not enough. A person lands an item by completing it in its details, which also takes over a completion an agent made. A prerequisite that is not an item of the project, or that waits back on this item, keeps it waiting. A project with no Manager has one started by the queue instead. Users can pause this per project, from the Tracker's **Queue** or the Work queue section of the project's details.
