@@ -547,8 +547,8 @@ mod tests {
 
     #[test]
     fn every_savable_draft_passes_the_engine_check() {
-        for soft in 0..=100 {
-            for hard in 0..=100 {
+        for soft in 0..=100u8 {
+            for hard in 0..=100u8 {
                 for freeze in [soft, hard, hard.saturating_add(1).min(100), 100] {
                     let editor = drafted(soft, hard, freeze);
                     if editor.error().is_none() {
