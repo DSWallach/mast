@@ -652,7 +652,11 @@ impl QuotaCaps {
                 .when(can_save, |el| {
                     el.on_click(cx.listener(|this, _, _, cx| this.save(cx)))
                 })
-                .when(!can_save, |el| el.opacity(0.4).cursor_default()),
+                // The primary button's hover style resets opacity to 0.9, which made a
+                // disabled Save under the cursor look enabled; keep it dimmed on hover.
+                .when(!can_save, |el| {
+                    el.opacity(0.4).cursor_default().hover(|style| style.opacity(0.4))
+                }),
             )
             .into_any_element()
     }
