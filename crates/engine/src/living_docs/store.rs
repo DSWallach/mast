@@ -6,11 +6,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::{
     DocDriftStatus, DocStatusChange, DriftFinding, KnownSymbols, LivingDocClass, LivingDocRow,
-    RepoTree, check_markdown, staleness::apply_land,
+    RepoTree, check_markdown, repo_path, staleness::apply_land,
 };
 
 /// File name inside the directory given to [`LivingDocStore::open`].
@@ -41,6 +43,39 @@ struct LedgerFile {
     projects: BTreeMap<String, ProjectLedger>,
 }
 
+/// Decode the file. The wire row enums are strict, so a value written by a
+/// newer engine is replaced first: an unknown status reads as pending review
+/// (never fresh) and an unknown class as an item doc.
+fn parse(bytes: &[u8]) -> serde_json::Result<LedgerFile> {
+    let mut file: Value = serde_json::from_slice(bytes)?;
+    let rows = file
+        .get_mut("projects")
+        .and_then(Value::as_object_mut)
+        .into_iter()
+        .flat_map(|projects| projects.values_mut())
+        .filter_map(|ledger| ledger.get_mut("rows")?.as_array_mut())
+        .flatten();
+    for row in rows {
+        replace_unknown::<LivingDocClass>(row, "class", LivingDocClass::Item)?;
+        replace_unknown::<DocDriftStatus>(row, "driftStatus", DocDriftStatus::PendingReview)?;
+    }
+    serde_json::from_value(file)
+}
+
+fn replace_unknown<T: Serialize + DeserializeOwned>(
+    row: &mut Value,
+    key: &str,
+    fallback: T,
+) -> serde_json::Result<()> {
+    if let Some(value) = row.get_mut(key)
+        && value.is_string()
+        && T::deserialize(&*value).is_err()
+    {
+        *value = serde_json::to_value(fallback)?;
+    }
+    Ok(())
+}
+
 /// The persisted ledgers. Every change is written before it is visible, so a
 /// failed write leaves both the file and memory as they were. One engine owns
 /// the file.
@@ -55,7 +90,7 @@ impl LivingDocStore {
     pub fn open(dir: &Path) -> Result<Self, String> {
         let path = dir.join(STORE_FILE);
         let state = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
+            Ok(bytes) => parse(&bytes)
                 .map_err(|error| format!("living docs ledger {}: {error}", path.display()))?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => LedgerFile::default(),
             Err(error) => return Err(format!("living docs ledger {}: {error}", path.display())),
@@ -157,13 +192,13 @@ impl LivingDocStore {
                 if row.class == LivingDocClass::Changelog {
                     continue;
                 }
-                if row.repo_path().is_some_and(|path| !path.ends_with(".md")) {
+                if repo_path(row).is_some_and(|path| !path.ends_with(".md")) {
                     continue;
                 }
                 let Some(text) = read_doc(&row.doc_id) else {
                     continue;
                 };
-                let found = check_markdown(&text, row.repo_path(), known, tree);
+                let found = check_markdown(&text, repo_path(row), known, tree);
                 let from = row.drift_status;
                 if !found.is_empty() {
                     row.drift_status = DocDriftStatus::DriftDetected;
@@ -259,6 +294,24 @@ mod tests {
         let ledger = LivingDocStore::open(dir.path()).unwrap().ledger("p");
         assert_eq!(ledger.rows[0].doc_id, "repo:a.md");
         assert!(ledger.exempt_receipts.is_empty() && ledger.findings.is_empty());
+    }
+
+    #[test]
+    fn unknown_row_enum_values_load_without_reading_as_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = r#"{"projects":{"p":{"laterField":1,"rows":[
+            {"docId":"repo:a.md","class":"runbook","driftStatus":"quarantined","laterField":1},
+            {"docId":"repo:b.md","class":"spec","driftStatus":"owedUpdate"}]}}}"#;
+        std::fs::write(dir.path().join(STORE_FILE), file).unwrap();
+        let rows = LivingDocStore::open(dir.path()).unwrap().ledger("p").rows;
+        assert_eq!(
+            (rows[0].class, rows[0].drift_status),
+            (LivingDocClass::Item, DocDriftStatus::PendingReview)
+        );
+        assert_eq!(
+            (rows[1].class, rows[1].drift_status),
+            (LivingDocClass::Spec, DocDriftStatus::OwedUpdate)
+        );
     }
 
     #[test]

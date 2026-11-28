@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{DocDriftStatus, LivingDocRow, ProjectLedger, watch_matches};
+use super::{DocDriftStatus, LivingDocRow, ProjectLedger, repo_path, watch_matches};
 
 /// A row whose drift status a landed commit changed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,10 +50,9 @@ pub fn apply_land(
             continue;
         }
         let from = row.drift_status;
-        let in_commit = row
-            .repo_path()
-            .is_some_and(|path| changed_paths.iter().any(|changed| changed == path));
-        let hash = blob_hash_of(row.repo_path().unwrap_or(&row.doc_id));
+        let in_commit =
+            repo_path(row).is_some_and(|path| changed_paths.iter().any(|changed| changed == path));
+        let hash = blob_hash_of(repo_path(row).unwrap_or(&row.doc_id));
         if in_commit && hash.is_none() {
             // The commit removed the document: nothing is left to be fresh.
             row.current_hash.clear();
@@ -101,7 +100,7 @@ pub fn apply_land(
 
 fn updated(row: &LivingDocRow, in_commit: bool, hash: Option<&str>) -> bool {
     let moved = hash.is_some_and(|hash| hash != row.current_hash);
-    if row.repo_path().is_some() {
+    if repo_path(row).is_some() {
         in_commit && moved
     } else {
         // An artifact never seen before has no earlier hash to differ from.

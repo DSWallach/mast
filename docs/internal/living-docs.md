@@ -5,9 +5,21 @@ which are owed an update and which no longer match the code. It calls no model.
 
 **Not wired yet.** No land step, hand-off or tool calls it. Rows are stored
 engine-side only; syncing them into the project document inventory is deferred.
-The engine types share the JSON shape of the row contract in
-`mast_proto::project_document_inventory` and convert into it, but read unknown
-enum values (an unknown status reads as pending review, never fresh).
+Rows, enums and the ledger snapshot are the contracts in
+`mast_proto::project_document_inventory`.
+
+## Proto follow-ups
+
+- `LivingDocClass` and `DocDriftStatus` reject unknown values. The store
+  replaces them while loading its file (unknown status reads as pending review,
+  never fresh; unknown class as item), and the next write keeps the
+  replacement. Syncing rows needs lenient enums on the wire types.
+- `LivingDocRow` has no field for what the drift check found. Findings stay in
+  the engine ledger, keyed by `docId`.
+- Exempt receipts have no wire type and stay in the engine ledger.
+- `DocumentationInventory` has no living-doc rows to sync into.
+- `DocLedgerSummary` has no rendered text; `DocLedgerDigest` carries it beside
+  the snapshot.
 
 ## Rows and storage
 
@@ -54,7 +66,9 @@ include hidden commands). An empty set turns that check off. It flags:
   `mcp__mast-agent__<tool>` span, that is not a known tool;
 - a `mast <command>` span naming an unknown command.
 
-Fenced blocks, prose, placeholders and globs are ignored. Renamed tools outside
+Fenced blocks, prose, placeholders, globs and missing files under `build/`,
+`target/` or `node_modules/` are ignored. A span naming a file in some other
+checkout, under a directory this repo also has, is still reported. Renamed tools outside
 those prefixes are missed on purpose: broader prefixes match ordinary
 identifiers. Pass a `RepoTree` over the landed tree; `FsRepoTree` reads a
 checkout. A row that checks clean again returns to owed or fresh. A document
@@ -62,7 +76,8 @@ update clears drift until the next check.
 
 ## Hand-off digest
 
-`build_doc_ledger_summary(pins, rows, resync_job)` returns the canonical pins
-and every row that is not fresh or has pending deltas (drift first, then owed,
-review and delta-only rows, each by id), plus text of at most 1536 bytes that
-counts any rows it leaves out.
+`build_doc_ledger_summary(pins, rows, resync_job)` takes a `DocLedgerSummary`
+holding the canonical pins. It returns a `DocLedgerDigest`: that snapshot with
+every row that is not fresh or has pending deltas (drift first, then owed,
+review and delta-only rows, each by id) and any re-sync job in flight, plus
+text of at most 1536 bytes that counts any rows it leaves out.
