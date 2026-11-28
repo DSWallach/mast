@@ -269,6 +269,27 @@ impl QuotaBroker {
 
     /// Choose where the next unit of work runs.
     pub fn decide(&self, policy: ProviderQuotaPolicy, pinned: Provider) -> Decision {
+        self.decide_with_cost(policy, pinned, 0.0)
+    }
+
+    /// Decide and, on dispatch, reserve `cost` atomically, so a burst of
+    /// spawns sees each other's reservations and cannot overshoot the cap.
+    /// Returns the decision and the reservation id when one was taken.
+    pub fn dispatch(
+        &self,
+        policy: ProviderQuotaPolicy,
+        pinned: Provider,
+        cost: f32,
+    ) -> (Decision, Option<u64>) {
+        let decision = self.decide_with_cost(policy, pinned, cost);
+        let id = match decision {
+            Decision::Dispatch(provider) => Some(self.reserve(provider, cost)),
+            _ => None,
+        };
+        (decision, id)
+    }
+
+    fn decide_with_cost(&self, policy: ProviderQuotaPolicy, pinned: Provider, cost: f32) -> Decision {
         let mut state = self.state.lock().unwrap();
         match policy {
             ProviderQuotaPolicy::PinnedFreeze => {
@@ -286,11 +307,11 @@ impl QuotaBroker {
                     Decision::Dispatch(pinned)
                 }
             }
-            ProviderQuotaPolicy::BalancedFailover => self.decide_balanced(&mut state),
+            ProviderQuotaPolicy::BalancedFailover => self.decide_balanced(&mut state, cost),
         }
     }
 
-    fn decide_balanced(&self, state: &mut State) -> Decision {
+    fn decide_balanced(&self, state: &mut State, cost: f32) -> Decision {
         let cfg = self.config;
         let mut headroom: Vec<(Provider, f32)> = Vec::new();
         for provider in Provider::ALL {
@@ -299,7 +320,7 @@ impl QuotaBroker {
                 .get(&provider)
                 .and_then(|p| used_fraction(p).map(|f| f + p.inflight))
                 .unwrap_or(0.0);
-            if fraction < cfg.hard_cap {
+            if fraction + cost <= cfg.hard_cap && fraction < cfg.hard_cap {
                 headroom.push((provider, cfg.hard_cap - fraction));
             }
         }
@@ -637,5 +658,65 @@ mod tests {
         b.reserve(Provider::Antigravity, 0.6);
         let payload = serde_json::to_string(&b.status_payload()).unwrap();
         assert!(payload.len() < 550, "{} bytes", payload.len());
+    }
+
+    #[test]
+    fn burst_reservations_stop_dispatch_overshooting_hard_cap() {
+        let (b, _c, readings, _) = rig(None);
+        set(&readings, 0.5, 0.5, 0.5);
+        b.set_orchestration_active(true);
+        b.poll_due();
+        let mut dispatched = 0;
+        for _ in 0..50 {
+            if let (Decision::Dispatch(_), Some(_)) =
+                b.dispatch(ProviderQuotaPolicy::BalancedFailover, Provider::Codex, 0.1)
+            {
+                dispatched += 1;
+            }
+        }
+        // Each provider has 0.35 of room: three 0.1 spawns each, none more.
+        assert_eq!(dispatched, 9);
+        for p in Provider::ALL {
+            assert!(b.effective_fraction(p).unwrap() <= 0.85 + 1e-6);
+        }
+        assert!(matches!(
+            b.decide(ProviderQuotaPolicy::BalancedFailover, Provider::Codex),
+            Decision::Dispatch(_)
+        ));
+        assert!(matches!(
+            b.dispatch(ProviderQuotaPolicy::BalancedFailover, Provider::Codex, 0.1).0,
+            Decision::PauseAll { .. }
+        ));
+    }
+
+    #[test]
+    fn pauses_when_all_three_are_exactly_at_cap() {
+        let (b, _c, readings, _) = rig(None);
+        set(&readings, 0.85, 0.85, 0.85);
+        b.set_orchestration_active(true);
+        b.poll_due();
+        assert!(matches!(
+            b.decide(ProviderQuotaPolicy::BalancedFailover, Provider::Codex),
+            Decision::PauseAll { .. }
+        ));
+    }
+
+    #[test]
+    fn pinned_freeze_keeps_provider_and_ignores_other_headroom() {
+        let (b, _c, readings, _) = rig(None);
+        set(&readings, 0.0, 0.0, 0.9);
+        b.set_orchestration_active(true);
+        b.poll_due();
+        for _ in 0..3 {
+            match b.decide(ProviderQuotaPolicy::PinnedFreeze, Provider::Codex) {
+                Decision::Freeze { provider, fraction } => {
+                    assert_eq!(provider, Provider::Codex);
+                    assert!(fraction >= 0.9);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        // No failover side effect: the balanced cursor is untouched.
+        assert_eq!(b.state.lock().unwrap().current, None);
     }
 }
