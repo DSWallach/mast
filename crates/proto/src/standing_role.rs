@@ -214,6 +214,146 @@ impl StandingRole {
     }
 }
 
+// ── Lead tier (Manager → Lead → Worker) ──────────────────────────────────
+
+/// Deepest chat in a Lead hierarchy, counting the Manager as depth 0: the Lead
+/// is 1 and its Workers are 2. A launch that would make depth 3 is refused.
+pub const MAX_LEAD_HIERARCHY_DEPTH: u8 = 2;
+/// Live Leads one project may have.
+pub const MAX_LEADS_PER_PROJECT: usize = 4;
+/// Live Workers one Lead may have.
+pub const MAX_WORKERS_PER_LEAD: usize = 6;
+/// Largest context a Lead is launched with (slice down).
+pub const MAX_LEAD_CONTEXT_TOKENS: u32 = 8_000;
+/// Largest digest a Lead sends its Manager (summary up).
+pub const MAX_LEAD_DIGEST_TOKENS: u32 = 350;
+
+/// One token per four bytes, rounded up: the estimate every Lead cap uses.
+pub fn approx_tokens(text: &str) -> u32 {
+    u32::try_from(text.len().div_ceil(4)).unwrap_or(u32::MAX)
+}
+
+/// Cut `text` to at most `max_bytes` on a char boundary, ending in `…` when cut.
+fn clip(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    let mut end = max_bytes.saturating_sub('…'.len_utf8());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+/// What a Lead is told when it starts or rotates: its slice of the plan, never
+/// the whole project. Sent down; the wire form is the same on a paired peer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LeadContextPacket {
+    pub lead_item_id: String,
+    pub goal: String,
+    /// The subtree the Lead's path lease covers; its Workers' paths must sit inside.
+    pub owned_paths: Vec<String>,
+    pub req_ids: Vec<String>,
+    /// Budget carved from the Manager's; the Lead carves its Workers' from this.
+    pub budget: crate::ItemBudget,
+    /// Free text from the Manager (decisions, contracts the slice depends on).
+    pub brief: String,
+}
+
+impl LeadContextPacket {
+    /// The packet as the Lead reads it, cut so it never exceeds
+    /// [`MAX_LEAD_CONTEXT_TOKENS`]. Only the free-text brief is ever cut.
+    pub fn render(&self) -> String {
+        let head = format!(
+            "[Lead context for work item {}]\nGoal: {}\nOwned paths: {}\nRequirements: {}\nBudget: {} tokens, {} turns\n",
+            self.lead_item_id,
+            self.goal,
+            self.owned_paths.join(", "),
+            self.req_ids.join(", "),
+            self.budget.max_tokens.map_or("unspecified".into(), |n| n.to_string()),
+            self.budget.max_turns.map_or("unspecified".into(), |n| n.to_string()),
+        );
+        let cap = MAX_LEAD_CONTEXT_TOKENS as usize * 4;
+        let room = cap.saturating_sub(head.len() + "Brief: ".len());
+        let out = format!("{head}Brief: {}", clip(&self.brief, room));
+        clip(&out, cap)
+    }
+}
+
+/// How a Lead's subtree stands.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LeadDigestStatus {
+    #[default]
+    InProgress,
+    Blocked,
+    Done,
+}
+
+/// The only thing a Manager hears from a Lead's subtree. Built by the engine
+/// from the Lead's report; leaf Workers' events never reach the Manager.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LeadDigest {
+    pub lead_item_id: String,
+    pub lead_chat_id: String,
+    pub status: LeadDigestStatus,
+    pub summary: String,
+    pub blockers: Vec<String>,
+    pub prs: Vec<String>,
+}
+
+impl LeadDigest {
+    /// A digest of a Lead's free-text report: its first lines, cut to fit.
+    pub fn from_report(lead_item_id: &str, lead_chat_id: &str, report: &str) -> Self {
+        Self {
+            lead_item_id: lead_item_id.to_owned(),
+            lead_chat_id: lead_chat_id.to_owned(),
+            summary: report.trim().to_owned(),
+            ..Self::default()
+        }
+        .bounded()
+    }
+
+    /// The digest as the Manager reads it, within [`MAX_LEAD_DIGEST_TOKENS`].
+    pub fn render(&self) -> String {
+        let mut out = format!(
+            "[Lead digest, item {}, chat {}] status: {:?}\n{}",
+            self.lead_item_id, self.lead_chat_id, self.status, self.summary
+        );
+        for blocker in &self.blockers {
+            out.push_str("\nBlocker: ");
+            out.push_str(blocker);
+        }
+        for pr in &self.prs {
+            out.push_str("\nPR: ");
+            out.push_str(pr);
+        }
+        out
+    }
+
+    /// This digest with its summary, blockers and PRs trimmed until the
+    /// rendered text fits [`MAX_LEAD_DIGEST_TOKENS`]. Lists are cut first.
+    pub fn bounded(mut self) -> Self {
+        let cap = MAX_LEAD_DIGEST_TOKENS as usize * 4;
+        self.blockers.iter_mut().for_each(|b| *b = clip(b, 200));
+        self.prs.iter_mut().for_each(|p| *p = clip(p, 120));
+        self.blockers.truncate(3);
+        self.prs.truncate(3);
+        while self.render().len() > cap && (!self.blockers.is_empty() || !self.prs.is_empty()) {
+            if self.blockers.pop().is_none() {
+                self.prs.pop();
+            }
+        }
+        let overflow = self.render().len().saturating_sub(cap);
+        if overflow > 0 {
+            self.summary = clip(&self.summary, self.summary.len().saturating_sub(overflow));
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +423,32 @@ mod tests {
             read_only: None,
         };
         assert_eq!(role.predecessors(), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_lead_digest_and_context_packet_never_exceed_their_caps() {
+        let long = "word ".repeat(5_000);
+        let digest = LeadDigest {
+            blockers: vec![long.clone(); 9],
+            prs: vec![long.clone(); 9],
+            summary: long.clone(),
+            ..LeadDigest::default()
+        }
+        .bounded();
+        assert!(approx_tokens(&digest.render()) <= MAX_LEAD_DIGEST_TOKENS);
+        assert!(LeadDigest::from_report("i", "c", &long).render().len() <= 1400);
+        let short = LeadDigest::from_report("i", "c", "done");
+        assert!(short.render().ends_with("done"));
+        let packet = LeadContextPacket { brief: long.repeat(20), ..LeadContextPacket::default() };
+        assert!(approx_tokens(&packet.render()) <= MAX_LEAD_CONTEXT_TOKENS);
+        assert!(clip("héllo wörld", 4).is_char_boundary(clip("héllo wörld", 4).len()));
+    }
+
+    #[test]
+    fn lead_wire_types_tolerate_missing_fields() {
+        let digest: LeadDigest = serde_json::from_str(r#"{"leadItemId":"i"}"#).unwrap();
+        assert_eq!(digest.status, LeadDigestStatus::InProgress);
+        let packet: LeadContextPacket = serde_json::from_str("{}").unwrap();
+        assert!(packet.owned_paths.is_empty());
     }
 }
