@@ -256,7 +256,15 @@ impl EngineRpc {
 
     /// Before a local Lead launch: bring the count of the Leads on paired
     /// devices up to date (best effort).
-    async fn refresh_peer_leads_for_local(&self) {
+    ///
+    /// Outlined and boxed (as is `launch_peer_lead`): the dispatch futures in `handle` are
+    /// polled on a 2 MiB worker stack in debug builds, and an async fn's state built inline at
+    /// its await site adds to that frame; here it is built in this small frame and moved to the heap.
+    fn refresh_peer_leads_for_local(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(self.refresh_peer_leads_for_local_inner())
+    }
+
+    async fn refresh_peer_leads_for_local_inner(&self) {
         let dir = self.repos.data_dir().to_path_buf();
         if let Ok(Ok(links)) = tokio::task::spawn_blocking(move || crate::peer_outbound::load_links(&dir)).await
             && !links.peers.is_empty()
@@ -271,7 +279,14 @@ impl EngineRpc {
     /// device holds, leases from the Manager's own outline), under the launch
     /// gate, and only then asks the device to create it. The device honours a
     /// Lead only on this path (`PeerLeadCreate`).
-    async fn launch_peer_lead(&self, launch: crate::agent_tools::PeerLeadLaunch) -> Result<serde_json::Value, RpcError> {
+    fn launch_peer_lead(
+        &self,
+        launch: crate::agent_tools::PeerLeadLaunch,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, RpcError>> + Send + '_>> {
+        Box::pin(self.launch_peer_lead_inner(launch))
+    }
+
+    async fn launch_peer_lead_inner(&self, launch: crate::agent_tools::PeerLeadLaunch) -> Result<serde_json::Value, RpcError> {
         use mast_proto::peer_link as wire;
         let crate::agent_tools::PeerLeadLaunch { launch, peer, space_id } = launch;
         let fail = |message: String| RpcError::Failed(message);
