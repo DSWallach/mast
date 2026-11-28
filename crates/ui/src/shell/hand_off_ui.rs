@@ -963,6 +963,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_outline_chat_menu_offers_open_successor_only_on_an_archived_hand_off_source(cx: &mut gpui::TestAppContext) {
+        use crate::work_outline::outline_view::context_menu::{MenuAction, MenuKind, OutlineContextMenu};
+        let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
+        let entry = |shell: &gpui::Entity<Shell>, cx: &mut gpui::VisualTestContext, kind: MenuKind| {
+            shell.read_with(cx, |shell, cx| {
+                let mut menu = OutlineContextMenu {
+                    kind,
+                    row_key: None,
+                    space_id: Some("s1".into()),
+                    item_id: None,
+                    chat_id: Some(CHAT_API.into()),
+                    entries: Vec::new(),
+                    status_entries: Vec::new(),
+                };
+                shell.add_sidebar_chat_entries(&mut menu, cx);
+                menu.entries.into_iter().find(|e| e.id == "open-successor").map(|e| (e.label.to_string(), e.action))
+            })
+        };
+        assert_eq!(entry(&shell, cx, MenuKind::Chat), None, "nothing was handed off");
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats.iter_mut().find(|chat| chat.id == CHAT_UI).unwrap().hand_off_from = Some(CHAT_API.into());
+            });
+        });
+        assert_eq!(entry(&shell, cx, MenuKind::Chat), None, "the source is not archived");
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| state.chats.iter_mut().find(|chat| chat.id == CHAT_API).unwrap().archived = true);
+        });
+        assert_eq!(
+            entry(&shell, cx, MenuKind::Chat),
+            Some(("Open successor".to_owned(), MenuAction::OpenSuccessor(CHAT_UI.into())))
+        );
+        assert_eq!(entry(&shell, cx, MenuKind::Manager), None, "managers are not handed off this way");
+    }
+
+    #[gpui::test]
     fn a_successful_hand_off_opens_the_successor_and_shows_a_notice_with_open(cx: &mut gpui::TestAppContext) {
         let (shell, cx) = super::super::chat_item_tests::mount(cx, CHAT_API, false, |_| {});
         let actions = crate::work_outline::actions::WorkOutlineActions::scripted(Arc::new(|_, _| Ok(successor_reply("successor"))));

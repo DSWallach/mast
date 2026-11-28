@@ -18,6 +18,19 @@ steps:
       not_visible: "#hand-off-dialog"
     criterion: handoff-open-successor.1
     caption: The dialog is gone and a notice says the chat was handed off, with an Open action.
+  - expect:
+      visible: "#shell-notice-dismiss"
+    criterion: handoff-open-successor.4
+    caption: The notice also offers Dismiss.
+  - click: "#shell-notice-action"
+    caption: Use the notice's own Open action.
+  - expect:
+      text: "Continue Add search to the sidebar."
+      within: "#transcript-region"
+      not_text: "Review the workspace layout."
+      not_visible: "#shell-notice"
+    criterion: handoff-open-successor.5
+    caption: The notice's Open shows the successor and the notice goes away.
   - click: "#nav-back"
     caption: Go back to the chat that was handed off, which is now archived.
   - click: "#chat-header-menu"
@@ -39,3 +52,19 @@ steps:
       not_text: "Review the workspace layout."
     criterion: handoff-open-successor.3
     caption: The successor opens, showing the hand-off summary and none of the old chat's messages.
+  - click: "#chat-header-menu"
+    caption: Open the successor's chat menu.
+  - click: "#chat-menu-hand-off"
+    caption: Hand the successor off too.
+  - click: "#hand-off-submit"
+    caption: Hand off with the defaults.
+  - expect:
+      visible: "#shell-notice-dismiss"
+    criterion: handoff-open-successor.6
+    caption: A new notice appears with Dismiss.
+  - click: "#shell-notice-dismiss"
+    caption: Dismiss the notice.
+  - expect:
+      not_visible: "#shell-notice"
+    criterion: handoff-open-successor.7
+    caption: Dismiss removes the notice without opening anything.

@@ -62,9 +62,12 @@ steps:
   - click: "#outline-row-scheduled-fixture-task-1-0"
     caption: Open the pinned task's latest run.
   - expect:
-      visible: "#outline-row-scheduled-fixture-task-1-0"
+      visible: "#transcript-region"
     criterion: scheduled-pins.6
-    caption: The pinned task's run opens and its row stays in the outline.
+    caption: The pinned task's run opens in the run view.
+  - expect:
+      visible: "#outline-row-scheduled-fixture-task-1-0"
+    caption: The pinned task's row stays in the outline beside the run view.
   - right_click: "#outline-row-scheduled-fixture-task-1-0"
     caption: Open the Weekly report row menu again.
   - click: "#chat-menu-pin"
