@@ -135,6 +135,23 @@ A worker whose single tool call stays open (a hung wait loop, an ssh that never 
 
 A project Manager can reach chats in its managed project, including archived chats where the action supports them; the grant does not extend to unrelated projects.
 
+### Build queue: `build_*`
+
+Six compact tools queue and follow builds on the shared build queue (`build_jobs`), so a chat does not run Cargo itself. Each schema is under 600 bytes. They are visible to Worker, Verifier and coordinator chats; the queue must be configured on the engine, otherwise every call fails with "build queue is unavailable".
+
+| Tool | Purpose | Scoping |
+|---|---|---|
+| `build_enqueue {idempotencyKey, argv, cwd?, headSha?, host?, label?, wake?, integration?}` | Queue a job. Returns the job, its queue `position`, `replay`/`coalesced`, `approvalRequestId` and `matchedRule`. | `cwd` stays inside the chat's working directory. Reusing a key with a different argv fails with `operationConflict`. |
+| `build_status {jobId}` | State, slot, exit code, summary and queue position. | Only a chat attached to the job (its owner or a coalesced waiter) in the same Space. |
+| `build_list {activeOnly?, limit?}` | The chat's own jobs, newest first (default 50, at most 100). | This chat and Space only. |
+| `build_wait {jobId}` | Register the completion wake and return at once; end the turn and the engine wakes the chat. | Attached chats only. |
+| `build_log {jobId, offset?, maxBytes?}` | A byte window of the job log (default 8 KiB, at most 64 KiB) and `nextOffset`. | Attached chats only. |
+| `build_cancel {jobId}` | Cancel a queued or running job. | Attached chats only. |
+
+`argv` is run directly: no shell, no pipes or redirection. Only `cargo test|nextest|build|check|clippy`, `scripts/ui-preview.sh` and `scripts/ui-flow.sh` are accepted. `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` belong to the slot.
+
+**Approval.** The command text is matched against the Space's enabled `ApprovalRule`s with the same matcher as harness command prompts. A match queues the job at once and counts as a use of the rule: its `hitCount` and `lastUsedAt` advance. With no match the job waits in `awaiting_approval` and an Approve Required Action (`dedupeKey` `build:<jobId>`) is raised on the chat's work item. When the user approves it the job is queued; any other resolution cancels it. The outcome is applied the next time the chat calls a `build_*` tool. A chat with no work item cannot raise the request and the job stays in `awaiting_approval` until it is approved in the UI.
+
 ### Role-scoped catalog and `quota_status`
 
 The tool catalog a chat sees depends on its live role. A Worker sees a short list
