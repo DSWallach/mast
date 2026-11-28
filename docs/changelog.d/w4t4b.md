@@ -1,0 +1,1 @@
+- Living documents: an automatic Manager hand-off now carries every document owed an update, drifted document and queued doc note to the successor, and the merge queue can apply each landed commit to the documentation ledger.

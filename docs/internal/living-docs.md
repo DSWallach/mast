@@ -3,7 +3,7 @@
 `crates/engine/src/living_docs/` tracks which documents a project keeps current,
 which are owed an update and which no longer match the code. It calls no model.
 
-**Not wired yet.** No land step, hand-off or tool calls it. Rows are stored
+**Partly wired.** Automatic Manager hand-offs read the ledger (`PendingHandoffs::living_docs`, opened beside the pending-hand-off file, keyed by the Manager's scope item id) and put every row owed work in the successor prompt. `MergeQueue::set_land_hook(land::merge_queue_hook(store))` applies each landed commit; nothing installs it yet, because the engine does not construct a `MergeQueue`, and its `project_id` must equal that scope item id. No tool, manual hand-off, post-turn doc gate or 80%-context flush calls it. Rows are stored
 engine-side only; syncing them into the project document inventory is deferred.
 Rows, enums and the ledger snapshot are the contracts in
 `mast_proto::project_document_inventory`.

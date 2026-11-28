@@ -10,6 +10,12 @@ An agent calls `artifact_publish` with a file (Markdown, HTML, Mermaid, an image
 
 **Promote to docs/plans/** copies the current revision to `docs/plans/<file name>` in the project's checkout. It is left uncommitted and never overwrites a different file; a changed copy is written as `<name>-2`, `-3` and so on. The copy is a snapshot: it does not follow later revisions, and the artifact stays the source of truth. Tracked design notes that predate artifacts live under `docs/internal/plans/`.
 
+## Keeping documents current
+
+Mast watches the repository documents a project keeps (`docs/mcp.md`, `ARCHITECTURE.md` and the like) against the code they describe. Each tracked document has watch globs. When a change lands through the merge queue that touches a watched path without also changing the document, the document is marked **owed an update**, and stays so until a commit that changes it lands. Landing `crates/mcp/src/tools/**` without `docs/mcp.md` owes `docs/mcp.md`. A document that names a tool, command or file that no longer exists is marked **drifted**; the check reads backticked references and costs no model tokens. A change that needs no document update can be recorded as exempt, with a reason.
+
+Owed and drifted documents, and worker notes queued for a document, are carried to the next Manager across a hand-off: see [Orchestrating](orchestrating.md).
+
 ## Questions
 
 A plan can hold question cards. Each has an id (`Q-1`), the question, and optionally an example and what it blocks.
