@@ -359,6 +359,13 @@ impl Shell {
         let build_badge = (!queued && !undelivered && search_query.is_none())
             .then(|| self.state.read(cx).build_jobs().row_badge(status, &id))
             .flatten();
+        let build_status = build_badge.map(|badge| {
+            if badge == crate::build_watch::jobs::ChatBadge::Building {
+                crate::status_style::Status::Working
+            } else {
+                crate::status_style::Status::Waiting
+            }
+        });
         let (status_label, status_color) = match build_badge {
             Some(badge) => (
                 Some(badge.label()),
@@ -490,6 +497,8 @@ impl Shell {
                 crate::status_style::Status::Errored
             } else if queued {
                 crate::status_style::Status::Waiting
+            } else if let Some(build) = build_status {
+                build
             } else {
                 status.into()
             };
@@ -497,7 +506,7 @@ impl Shell {
                 theme,
                 resolved_status,
                 working,
-                status == mast_proto::ChatIndicator::Completed && !queued && !undelivered,
+                shows_done_check(status, queued, undelivered, build_status.is_some()),
                 format!("{row_id}-working"),
                 status_color,
                 self.sidebar_pane.entity_id(),
@@ -547,6 +556,8 @@ impl Shell {
                         crate::status_style::Status::Errored
                     } else if queued {
                         crate::status_style::Status::Waiting
+                    } else if let Some(build) = build_status {
+                        build
                     } else {
                         status.into()
                     };
@@ -554,7 +565,7 @@ impl Shell {
                         theme,
                         resolved_status,
                         working,
-                        status == mast_proto::ChatIndicator::Completed,
+                        shows_done_check(status, queued, undelivered, build_status.is_some()),
                         format!("{row_id}-working"),
                         status_color,
                         self.sidebar_pane.entity_id(),
@@ -972,5 +983,32 @@ impl Shell {
                 )
             })
             .into_any_element()
+    }
+}
+
+/// The Done check belongs only to a finished, unread chat whose corner says "Done". A queued or
+/// undelivered send, or a build badge (`queued #2`, `building`), replaces that label, so the
+/// check must not sit beside it.
+fn shows_done_check(
+    status: mast_proto::ChatIndicator,
+    queued: bool,
+    undelivered: bool,
+    build_badged: bool,
+) -> bool {
+    status == mast_proto::ChatIndicator::Completed && !queued && !undelivered && !build_badged
+}
+
+#[cfg(test)]
+mod done_check_tests {
+    use super::shows_done_check;
+    use mast_proto::ChatIndicator::{Completed, Idle};
+
+    #[test]
+    fn done_check_yields_to_queue_undelivered_and_build_labels() {
+        assert!(shows_done_check(Completed, false, false, false));
+        assert!(!shows_done_check(Completed, true, false, false));
+        assert!(!shows_done_check(Completed, false, true, false));
+        assert!(!shows_done_check(Completed, false, false, true));
+        assert!(!shows_done_check(Idle, false, false, false));
     }
 }
